@@ -31,13 +31,17 @@ var installCmd = &cobra.Command{
 	Short: "Create a new Gas Town harness (workspace)",
 	Long: `Create a new Gas Town harness at the specified path.
 
-A harness is the top-level directory where Gas Town is installed. It contains:
+A harness is the top-level directory where Gas Town is installed - the root of
+your workspace where all rigs and agents live. It contains:
   - CLAUDE.md            Mayor role context (Mayor runs from harness root)
-  - mayor/               Mayor config and state
-  - rigs/                Managed rig clones (created by 'gt rig add')
-  - .beads/              Town-level beads DB (mayor mail, coordination)
+  - mayor/               Mayor config, state, and rig registry
+  - rigs/                Managed rig containers (created by 'gt rig add')
+  - .beads/              Town-level beads DB (gm-* prefix for mayor mail)
 
 If path is omitted, uses the current directory.
+
+See docs/harness.md for advanced harness configurations including beads
+redirects, multi-system setups, and harness templates.
 
 Examples:
   gt install ~/gt                         # Create harness at ~/gt

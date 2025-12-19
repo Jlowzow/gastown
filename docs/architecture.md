@@ -45,16 +45,28 @@ graph TB
 
 ## Core Concepts
 
-### Harness
+### Harness (Town)
 
-A **Harness** is the installation directory for Gas Town - the top-level workspace containing all components. The canonical GGT harness is at `~/gt/`. See [harness.md](harness.md) for setup details and migration from legacy configurations.
+A **Harness** is the installation directory where Gas Town lives - the physical root of your workspace. The terms "harness" and "town" are often used interchangeably:
+- **Harness** = physical (the directory at `~/gt/`)
+- **Town** = logical (the Gas Town workspace concept)
 
-### Town
+A harness contains:
+- `CLAUDE.md` - Mayor role context (Mayor runs from harness root)
+- `mayor/` - Mayor configuration, state, and registry
+- `.beads/` - Town-level beads (gm-* prefix for mayor mail)
+- `rigs/` or rig directories - Managed project containers
 
-A **Town** is a complete Gas Town installation - the workspace where everything lives. A town contains:
-- Town configuration (`config/` directory)
-- Mayor's home (`mayor/` directory at town level)
-- One or more **Rigs** (managed project repositories)
+Create a harness with `gt install`:
+```bash
+gt install ~/gt --git  # Create harness with git
+```
+
+**See**: [docs/harness.md](harness.md) for comprehensive harness documentation, including:
+- Beads redirect patterns for complex setups
+- Multi-system sharing (PGT/GGT coexistence)
+- Harness templates for organizations
+- Migration between harnesses
 
 ### Rig
 
@@ -220,25 +232,33 @@ This enables "Engineer in a Box" - polecats that execute structured workflows wi
 
 ## Directory Structure
 
-### Town Level
+### Harness Level
+
+The harness (town root) is created by `gt install`:
 
 ```
-~/gt/                              # Town root (Gas Town harness)
-├── CLAUDE.md                      # Mayor role prompting (at town root)
+~/gt/                              # HARNESS ROOT (Gas Town installation)
+├── CLAUDE.md                      # Mayor role context (runs from here)
 ├── .beads/                        # Town-level beads (prefix: gm-)
 │   ├── beads.db                   # Mayor mail, coordination, handoffs
 │   └── config.yaml
 │
-├── mayor/                         # Mayor's HOME at town level
+├── mayor/                         # Mayor configuration and state
 │   ├── town.json                  # {"type": "town", "name": "..."}
 │   ├── rigs.json                  # Registry of managed rigs
-│   └── state.json                 # Mayor state (NO mail/ directory)
+│   └── state.json                 # Mayor agent state
 │
-├── gastown/                       # A rig (project container)
-└── wyvern/                        # Another rig
+├── rigs/                          # Standard location for rigs
+│   ├── gastown/                   # A rig (project container)
+│   └── wyvern/                    # Another rig
+│
+└── <rig>/                         # OR rigs at harness root (legacy)
 ```
 
-**Note**: Mayor's mail is now in town beads (`gm-*` issues), not JSONL files.
+**Notes**:
+- Mayor's mail is in town beads (`gm-*` issues), not JSONL files
+- Rigs can be in `rigs/` or at harness root (both work)
+- See [docs/harness.md](harness.md) for advanced harness configurations
 
 ### Rig Level
 
@@ -320,19 +340,19 @@ graph TB
 
 ### ASCII Directory Layout
 
-For reference without mermaid rendering:
+For reference without mermaid rendering (see [harness.md](harness.md) for creation/setup):
 
 ```
-~/gt/                                    # TOWN ROOT (Gas Town harness)
-├── CLAUDE.md                            # Mayor role prompting
+~/gt/                                    # HARNESS ROOT (Gas Town installation)
+├── CLAUDE.md                            # Mayor role context
 ├── .beads/                              # Town-level beads (gm-* prefix)
 │   ├── beads.db                         # Mayor mail, coordination
 │   └── config.yaml
 │
-├── mayor/                               # Mayor's home (at town level)
+├── mayor/                               # Mayor configuration and state
 │   ├── town.json                        # {"type": "town", "name": "..."}
 │   ├── rigs.json                        # Registry of managed rigs
-│   └── state.json                       # Mayor state (no mail/ dir)
+│   └── state.json                       # Mayor agent state
 │
 ├── gastown/                             # RIG (container, NOT a git clone)
 │   ├── config.json                      # Rig configuration
@@ -1046,10 +1066,13 @@ This ensures all agents in the rig share a single beads database, separate from 
 
 ## CLI Commands
 
-### Town Management
+### Harness Management
 
 ```bash
-gt install [path]      # Install Gas Town at path
+gt install [path]      # Create Gas Town harness (see harness.md)
+gt install --git       # Also initialize git with .gitignore
+gt install --github=u/r  # Also create GitHub repo
+gt git-init            # Initialize git for existing harness
 gt doctor              # Check workspace health
 gt doctor --fix        # Auto-fix issues
 ```
