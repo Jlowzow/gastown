@@ -522,6 +522,43 @@ func (m *Manager) ensurePolecatArm(polecatName string) error {
 	return nil
 }
 
+// closePolecatArm closes the mol-polecat-arm tracking issue for a polecat.
+// Called when the polecat is cleaned up (completed, killed, etc.).
+func (m *Manager) closePolecatArm(polecatName, reason string) error {
+	if m.handoffState == nil {
+		return nil
+	}
+
+	ws, ok := m.handoffState.WorkerStates[polecatName]
+	if !ok || ws.ArmID == "" {
+		return nil // No arm to close
+	}
+
+	// Close the arm issue
+	cmd := exec.Command("bd", "close", ws.ArmID, "--reason", reason)
+	cmd.Dir = m.workDir
+
+	if out, err := cmd.CombinedOutput(); err != nil {
+		// If already closed, that's fine
+		if !strings.Contains(string(out), "already closed") {
+			return fmt.Errorf("closing arm %s: %s", ws.ArmID, string(out))
+		}
+	}
+
+	fmt.Printf("    Closed arm %s: %s\n", ws.ArmID, reason)
+
+	// Clear the arm ID from handoff state
+	ws.ArmID = ""
+	m.handoffState.WorkerStates[polecatName] = ws
+
+	// Persist the updated handoff state
+	if err := m.saveHandoffState(m.handoffState); err != nil {
+		return fmt.Errorf("saving handoff state: %w", err)
+	}
+
+	return nil
+}
+
 // checkAndProcess performs health check, shutdown processing, and auto-spawn.
 func (m *Manager) checkAndProcess(w *Witness) {
 	// Perform health check
@@ -1312,6 +1349,11 @@ func (m *Manager) cleanupPolecat(polecatName string) error {
 	if err := mayorGit.DeleteBranch(branchName, true); err != nil {
 		// Branch might already be deleted or merged, not a critical error
 		fmt.Printf("    Warning: failed to delete branch: %v\n", err)
+	}
+
+	// 5. Close the tracking arm (if it exists)
+	if err := m.closePolecatArm(polecatName, "polecat cleaned up"); err != nil {
+		fmt.Printf("    Warning: failed to close arm: %v\n", err)
 	}
 
 	return nil
