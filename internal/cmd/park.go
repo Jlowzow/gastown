@@ -9,10 +9,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/wisp"
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // Park command parks work on a gate, allowing agent to exit safely.
@@ -163,7 +161,7 @@ func runPark(cmd *cobra.Command, args []string) error {
 	}
 
 	// Store parked work in a file (alongside hook files)
-	parkedPath := wisp.WispPath(cloneRoot, fmt.Sprintf("parked-%s.json", strings.ReplaceAll(agentID, "/", "_")))
+	parkedPath := parkedWorkPath(cloneRoot, agentID)
 	parkedJSON, err := json.MarshalIndent(parked, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling parked work: %w", err)
@@ -190,9 +188,14 @@ func runPark(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// parkedWorkPath returns the file path for an agent's parked work state.
+func parkedWorkPath(cloneRoot, agentID string) string {
+	return wisp.WispPath(cloneRoot, fmt.Sprintf("parked-%s.json", strings.ReplaceAll(agentID, "/", "_")))
+}
+
 // readParkedWork reads the parked work state for an agent.
 func readParkedWork(cloneRoot, agentID string) (*ParkedWork, error) {
-	parkedPath := wisp.WispPath(cloneRoot, fmt.Sprintf("parked-%s.json", strings.ReplaceAll(agentID, "/", "_")))
+	parkedPath := parkedWorkPath(cloneRoot, agentID)
 	data, err := os.ReadFile(parkedPath)
 	if os.IsNotExist(err) {
 		return nil, nil
@@ -210,40 +213,10 @@ func readParkedWork(cloneRoot, agentID string) (*ParkedWork, error) {
 
 // clearParkedWork removes the parked work state for an agent.
 func clearParkedWork(cloneRoot, agentID string) error {
-	parkedPath := wisp.WispPath(cloneRoot, fmt.Sprintf("parked-%s.json", strings.ReplaceAll(agentID, "/", "_")))
+	parkedPath := parkedWorkPath(cloneRoot, agentID)
 	err := os.Remove(parkedPath)
 	if os.IsNotExist(err) {
 		return nil
 	}
 	return err
-}
-
-// sendGateWakeMail sends wake mail to all waiters when a gate closes.
-// This should be called after gate close (from Deacon or gate eval).
-func sendGateWakeMail(gateID, closeReason string, waiters []string) error {
-	// Find town root for mail routing
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil {
-		return fmt.Errorf("finding town root: %w", err)
-	}
-
-	router := mail.NewRouter(townRoot)
-
-	for _, waiter := range waiters {
-		msg := &mail.Message{
-			From:     "deacon/",
-			To:       waiter,
-			Subject:  fmt.Sprintf("🚦 GATE CLEARED: %s", gateID),
-			Body:     fmt.Sprintf("Gate %s has closed.\n\nReason: %s\n\nRun 'gt resume' to continue your parked work.", gateID, closeReason),
-			Type:     mail.TypeNotification,
-			Priority: mail.PriorityHigh,
-			Wisp:     true,
-		}
-		if err := router.Send(msg); err != nil {
-			// Log but don't fail on individual send errors
-			fmt.Fprintf(os.Stderr, "Warning: failed to send wake mail to %s: %v\n", waiter, err)
-		}
-	}
-
-	return nil
 }

@@ -84,10 +84,13 @@ func runResume(cmd *cobra.Command, args []string) error {
 	// Check gate status
 	gateCheck := exec.Command("bd", "gate", "show", parked.GateID, "--json")
 	gateOutput, err := gateCheck.Output()
+	gateNotFound := false
 	if err != nil {
-		// Gate might have been deleted or is inaccessible
-		status.GateClosed = false
-		status.CloseReason = "Gate not accessible"
+		// Gate might have been deleted (wisp cleanup) or is inaccessible
+		// Treat as "gate gone" - allow clearing stale parked work
+		gateNotFound = true
+		status.GateClosed = true // Treat as closed so user can clear it
+		status.CloseReason = "Gate no longer exists (may have been cleaned up)"
 	} else {
 		var gateInfo struct {
 			ID          string `json:"id"`
@@ -129,9 +132,14 @@ func runResume(cmd *cobra.Command, args []string) error {
 	}
 
 	// Gate closed - resume work!
-	fmt.Printf("%s Gate %s has cleared!\n", style.Bold.Render("🚦"), parked.GateID)
-	if status.CloseReason != "" {
-		fmt.Printf("  Reason: %s\n", status.CloseReason)
+	if gateNotFound {
+		fmt.Printf("%s Gate %s no longer exists\n", style.Bold.Render("⚠️"), parked.GateID)
+		fmt.Printf("  The gate may have been cleaned up. Restoring parked work anyway.\n")
+	} else {
+		fmt.Printf("%s Gate %s has cleared!\n", style.Bold.Render("🚦"), parked.GateID)
+		if status.CloseReason != "" {
+			fmt.Printf("  Reason: %s\n", status.CloseReason)
+		}
 	}
 
 	// Restore hook if we have a bead
