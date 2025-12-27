@@ -20,6 +20,11 @@ var (
 	logAgent  string
 	logSince  string
 	logFollow bool
+
+	// log crash flags
+	crashAgent    string
+	crashSession  string
+	crashExitCode int
 )
 
 var logCmd = &cobra.Command{
@@ -47,6 +52,23 @@ Examples:
 	RunE: runLog,
 }
 
+var logCrashCmd = &cobra.Command{
+	Use:   "crash",
+	Short: "Record a crash event (called by tmux pane-died hook)",
+	Long: `Record a crash event to the town log.
+
+This command is called automatically by tmux when a pane exits unexpectedly.
+It's not typically run manually.
+
+The exit code determines if this was a crash or expected exit:
+  - Exit code 0: Expected exit (logged as 'done' if no other done was recorded)
+  - Exit code non-zero: Crash (logged as 'crash')
+
+Examples:
+  gt log crash --agent gastown/Toast --session gt-gastown-Toast --exit-code 1`,
+	RunE: runLogCrash,
+}
+
 func init() {
 	logCmd.Flags().IntVarP(&logTail, "tail", "n", 20, "Number of events to show")
 	logCmd.Flags().StringVarP(&logType, "type", "t", "", "Filter by event type (spawn,wake,nudge,handoff,done,crash,kill)")
@@ -54,6 +76,13 @@ func init() {
 	logCmd.Flags().StringVar(&logSince, "since", "", "Show events since duration (e.g., 1h, 30m, 24h)")
 	logCmd.Flags().BoolVarP(&logFollow, "follow", "f", false, "Follow log output (like tail -f)")
 
+	// crash subcommand flags
+	logCrashCmd.Flags().StringVar(&crashAgent, "agent", "", "Agent ID (e.g., gastown/Toast)")
+	logCrashCmd.Flags().StringVar(&crashSession, "session", "", "Tmux session name")
+	logCrashCmd.Flags().IntVar(&crashExitCode, "exit-code", -1, "Exit code from pane")
+	_ = logCrashCmd.MarkFlagRequired("agent")
+
+	logCmd.AddCommand(logCrashCmd)
 	rootCmd.AddCommand(logCmd)
 }
 
@@ -229,6 +258,61 @@ func truncateStr(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// runLogCrash handles the "gt log crash" command from tmux pane-died hooks.
+func runLogCrash(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil || townRoot == "" {
+		// Try to find town root from common locations
+		// This is called from tmux hook which may not have proper cwd
+		home := os.Getenv("HOME")
+		possibleRoots := []string{
+			home + "/gt",
+			home + "/gastown",
+		}
+		for _, root := range possibleRoots {
+			if _, statErr := os.Stat(root + "/mayor"); statErr == nil {
+				townRoot = root
+				break
+			}
+		}
+		if townRoot == "" {
+			return fmt.Errorf("cannot find town root")
+		}
+	}
+
+	// Determine event type based on exit code
+	var eventType townlog.EventType
+	var context string
+
+	if crashExitCode == 0 {
+		// Exit code 0 = normal exit
+		// Could be handoff, done, or user quit - we log as "done" if no prior done event
+		// The Witness can analyze further if needed
+		eventType = townlog.EventDone
+		context = "exited normally"
+	} else if crashExitCode == 130 {
+		// Exit code 130 = Ctrl+C (SIGINT)
+		// This is typically intentional user interrupt
+		eventType = townlog.EventKill
+		context = fmt.Sprintf("interrupted (exit %d)", crashExitCode)
+	} else {
+		// Non-zero exit = crash
+		eventType = townlog.EventCrash
+		context = fmt.Sprintf("exit code %d", crashExitCode)
+		if crashSession != "" {
+			context += fmt.Sprintf(" (session: %s)", crashSession)
+		}
+	}
+
+	// Log the event
+	logger := townlog.NewLogger(townRoot)
+	if err := logger.Log(eventType, crashAgent, context); err != nil {
+		return fmt.Errorf("logging event: %w", err)
+	}
+
+	return nil
 }
 
 // LogEvent is a helper that logs an event from anywhere in the codebase.

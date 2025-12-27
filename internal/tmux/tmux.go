@@ -634,3 +634,18 @@ func (t *Tmux) SetCrewCycleBindings(session string) error {
 	}
 	return nil
 }
+
+// SetPaneDiedHook sets a pane-died hook on a session to detect crashes.
+// When the pane exits, tmux runs the hook command with exit status info.
+// The agentID is used to identify the agent in crash logs (e.g., "gastown/Toast").
+func (t *Tmux) SetPaneDiedHook(session, agentID string) error {
+	// Hook command logs the crash with exit status
+	// #{pane_dead_status} is the exit code of the process that died
+	// We run gt log crash which records to the town log
+	hookCmd := fmt.Sprintf(`run-shell "gt log crash --agent '%s' --session '%s' --exit-code #{pane_dead_status}"`,
+		agentID, session)
+
+	// Set the hook on this specific session
+	_, err := t.run("set-hook", "-t", session, "pane-died", hookCmd)
+	return err
+}

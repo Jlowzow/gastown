@@ -157,6 +157,10 @@ func (m *Manager) Start(polecat string, opts StartOptions) error {
 	theme := tmux.AssignTheme(m.rig.Name)
 	_ = m.tmux.ConfigureGasTownSession(sessionID, theme, m.rig.Name, polecat, "polecat")
 
+	// Set pane-died hook for crash detection (non-fatal)
+	agentID := fmt.Sprintf("%s/%s", m.rig.Name, polecat)
+	_ = m.tmux.SetPaneDiedHook(sessionID, agentID)
+
 	// Send initial command
 	command := opts.Command
 	if command == "" {
