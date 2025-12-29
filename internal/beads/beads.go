@@ -78,6 +78,10 @@ type Issue struct {
 	Blocks      []string `json:"blocks,omitempty"`
 	BlockedBy   []string `json:"blocked_by,omitempty"`
 
+	// Agent bead slots (type=agent only)
+	HookBead string `json:"hook_bead,omitempty"` // Current work attached to agent's hook
+	RoleBead string `json:"role_bead,omitempty"` // Role definition bead (shared)
+
 	// Counts from list output
 	DependencyCount int `json:"dependency_count,omitempty"`
 	DependentCount  int `json:"dependent_count,omitempty"`
@@ -622,6 +626,14 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 	var issue Issue
 	if err := json.Unmarshal(out, &issue); err != nil {
 		return nil, fmt.Errorf("parsing bd create output: %w", err)
+	}
+
+	// Set the role slot if specified (this is the authoritative storage)
+	if fields != nil && fields.RoleBead != "" {
+		if _, err := b.run("slot", "set", id, "role", fields.RoleBead); err != nil {
+			// Non-fatal: warn but continue
+			fmt.Printf("Warning: could not set role slot: %v\n", err)
+		}
 	}
 
 	return &issue, nil
