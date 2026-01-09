@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // Common errors
@@ -175,6 +176,18 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 	theme := tmux.AssignTheme(m.rig.Name)
 	_ = t.ConfigureGasTownSession(sessionID, theme, m.rig.Name, "witness", "witness")
 
+	roleConfig, err := m.roleConfig()
+	if err != nil {
+		_ = t.KillSession(sessionID)
+		return err
+	}
+
+	townRoot := m.townRoot()
+	// Apply role config env vars if present (non-fatal).
+	for key, value := range roleConfigEnvVars(roleConfig, townRoot, m.rig.Name) {
+		_ = t.SetEnvironment(sessionID, key, value)
+	}
+
 	// Update state to running
 	now := time.Now()
 	w.State = StateRunning
@@ -191,10 +204,10 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 	// NOTE: No gt prime injection needed - SessionStart hook handles it automatically
 	// Export GT_ROLE and BD_ACTOR in the command since tmux SetEnvironment only affects new panes
 	// Pass m.rig.Path so rig agent settings are honored (not town-level defaults)
-	command, err := config.BuildAgentStartupCommandWithAgentOverride("witness", bdActor, m.rig.Path, "", agentOverride)
+	command, err := buildWitnessStartCommand(m.rig.Path, m.rig.Name, townRoot, agentOverride, roleConfig)
 	if err != nil {
 		_ = t.KillSession(sessionID)
-		return fmt.Errorf("building startup command: %w", err)
+		return err
 	}
 	// Wait for shell to be ready before sending keys (prevents "can't find pane" under load)
 	if err := t.WaitForShellReady(sessionID, 5*time.Second); err != nil {
@@ -231,6 +244,48 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 	_ = t.NudgeSession(sessionID, session.PropulsionNudgeForRole("witness", witnessDir)) // Non-fatal
 
 	return nil
+}
+
+func (m *Manager) roleConfig() (*beads.RoleConfig, error) {
+	beadsPath := m.rig.BeadsPath()
+	beadsDir := beads.ResolveBeadsDir(beadsPath)
+	bd := beads.NewWithBeadsDir(beadsPath, beadsDir)
+	roleConfig, err := bd.GetRoleConfig(beads.RoleBeadIDTown("witness"))
+	if err != nil {
+		return nil, fmt.Errorf("loading witness role config: %w", err)
+	}
+	return roleConfig, nil
+}
+
+func (m *Manager) townRoot() string {
+	townRoot, err := workspace.Find(m.rig.Path)
+	if err != nil || townRoot == "" {
+		return m.rig.Path
+	}
+	return townRoot
+}
+
+func roleConfigEnvVars(roleConfig *beads.RoleConfig, townRoot, rigName string) map[string]string {
+	if roleConfig == nil || len(roleConfig.EnvVars) == 0 {
+		return nil
+	}
+	expanded := make(map[string]string, len(roleConfig.EnvVars))
+	for key, value := range roleConfig.EnvVars {
+		expanded[key] = beads.ExpandRolePattern(value, townRoot, rigName, "", "witness")
+	}
+	return expanded
+}
+
+func buildWitnessStartCommand(rigPath, rigName, townRoot, agentOverride string, roleConfig *beads.RoleConfig) (string, error) {
+	if roleConfig != nil && roleConfig.StartCommand != "" {
+		return beads.ExpandRolePattern(roleConfig.StartCommand, townRoot, rigName, "", "witness"), nil
+	}
+	bdActor := fmt.Sprintf("%s/witness", rigName)
+	command, err := config.BuildAgentStartupCommandWithAgentOverride("witness", bdActor, rigPath, "", agentOverride)
+	if err != nil {
+		return "", fmt.Errorf("building startup command: %w", err)
+	}
+	return command, nil
 }
 
 // Stop stops the witness.
