@@ -61,21 +61,6 @@ Role detection:
 
 This command is typically used in shell prompts or agent initialization.
 
-FLAGS:
-
-STATE MODE (--state):
-  Output detected role information as JSON and exit early.
-  Useful for scripting and programmatic role detection.
-  This flag is standalone - cannot be combined with other flags.
-
-DRY-RUN MODE (--dry-run):
-  Show what context would be output without side effects.
-  Skips session ID persistence, lock acquisition, and event emission.
-
-EXPLAIN MODE (--explain):
-  Provide verbose explanations for role detection decisions.
-  Shows why certain context is being included.
-
 HOOK MODE (--hook):
   When called as an LLM runtime hook, use --hook to enable session ID handling.
   This reads session metadata from stdin and persists it for the session.
@@ -86,11 +71,7 @@ HOOK MODE (--hook):
   Claude Code sends JSON on stdin:
     {"session_id": "uuid", "transcript_path": "/path", "source": "startup|resume"}
 
-  Other agents can set GT_SESSION_ID environment variable instead.
-
-FLAG COMBINATIONS:
-  --state is mutually exclusive with all other flags.
-  --dry-run, --explain, and --hook can be combined.`,
+  Other agents can set GT_SESSION_ID environment variable instead.`,
 	RunE: runPrime,
 }
 
@@ -121,11 +102,6 @@ func runPrime(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("finding workspace: %w", err)
 	}
 
-	// Validate mutually exclusive flags
-	if primeState && (primeHookMode || primeDryRun || primeExplain) {
-		return fmt.Errorf("--state cannot be combined with other flags (--hook, --dry-run, --explain)")
-	}
-
 	// "Discover, Don't Track" principle:
 	// - If we're in a workspace, proceed - the workspace's existence IS the enable signal
 	// - If we're NOT in a workspace, check the global enabled state
@@ -147,12 +123,10 @@ func runPrime(cmd *cobra.Command, args []string) error {
 			if cwd != townRoot {
 				persistSessionID(cwd, sessionID)
 			}
-			// Set environment for this process (affects event emission below)
-			_ = os.Setenv("GT_SESSION_ID", sessionID)
-			_ = os.Setenv("CLAUDE_SESSION_ID", sessionID) // Legacy compatibility
-		} else if primeExplain {
-			fmt.Println("[dry-run] Would persist session ID:", sessionID)
 		}
+		// Set environment for this process (affects event emission below)
+		_ = os.Setenv("GT_SESSION_ID", sessionID)
+		_ = os.Setenv("CLAUDE_SESSION_ID", sessionID) // Legacy compatibility
 		// Output session beacon
 		explain(true, "Session beacon: hook mode enabled, session ID from stdin")
 		fmt.Printf("[session:%s]\n", sessionID)
@@ -173,24 +147,6 @@ func runPrime(cmd *cobra.Command, args []string) error {
 	roleInfo, err := GetRoleWithContext(cwd, townRoot)
 	if err != nil {
 		return fmt.Errorf("detecting role: %w", err)
-	}
-
-	// --state mode: output JSON and exit early
-	if primeState {
-		return outputStateJSON(roleInfo, cwd, townRoot)
-	}
-
-	// --explain mode: show role detection reasoning
-	if primeExplain {
-		fmt.Printf("[explain] Role detection source: %s\n", roleInfo.Source)
-		fmt.Printf("[explain] Detected role: %s\n", roleInfo.Role)
-		if roleInfo.Rig != "" {
-			fmt.Printf("[explain] Rig: %s\n", roleInfo.Rig)
-		}
-		if roleInfo.Polecat != "" {
-			fmt.Printf("[explain] Polecat/Crew: %s\n", roleInfo.Polecat)
-		}
-		fmt.Println()
 	}
 
 	// Warn prominently if there's a role/cwd mismatch
@@ -228,18 +184,12 @@ func runPrime(cmd *cobra.Command, args []string) error {
 		if err := acquireIdentityLock(ctx); err != nil {
 			return err
 		}
-	} else if primeExplain {
-		fmt.Println("[dry-run] Would acquire identity lock for:", getAgentIdentity(ctx))
 	}
 
 	// Ensure beads redirect exists for worktree-based roles
 	// Skip if there's a role/location mismatch to avoid creating bad redirects
-	if !roleInfo.Mismatch {
-		if !primeDryRun {
-			ensureBeadsRedirect(ctx)
-		} else if primeExplain {
-			fmt.Println("[dry-run] Would ensure beads redirect")
-		}
+	if !roleInfo.Mismatch && !primeDryRun {
+		ensureBeadsRedirect(ctx)
 	}
 
 	// NOTE: reportAgentState("running") removed (gt-zecmc)
@@ -249,8 +199,6 @@ func runPrime(cmd *cobra.Command, args []string) error {
 	// Emit session_start event for seance discovery
 	if !primeDryRun {
 		emitSessionEvent(ctx)
-	} else if primeExplain {
-		fmt.Println("[dry-run] Would emit session_start event")
 	}
 
 	// Output session metadata for seance discovery
@@ -385,47 +333,6 @@ func detectRole(cwd, townRoot string) RoleInfo {
 
 	// Default: could be rig root - treat as unknown
 	return ctx
-}
-
-// PrimeState represents the JSON output for --state mode.
-type PrimeState struct {
-	Role     Role   `json:"role"`
-	Source   string `json:"source"`
-	Rig      string `json:"rig,omitempty"`
-	Polecat  string `json:"polecat,omitempty"`
-	TownRoot string `json:"town_root"`
-	WorkDir  string `json:"work_dir"`
-	Mismatch bool   `json:"mismatch,omitempty"`
-	CwdRole  Role   `json:"cwd_role,omitempty"`
-	Identity string `json:"identity,omitempty"`
-}
-
-// outputStateJSON outputs role state as JSON and returns (for --state flag).
-func outputStateJSON(roleInfo RoleInfo, cwd, townRoot string) error {
-	state := PrimeState{
-		Role:     roleInfo.Role,
-		Source:   roleInfo.Source,
-		Rig:      roleInfo.Rig,
-		Polecat:  roleInfo.Polecat,
-		TownRoot: townRoot,
-		WorkDir:  cwd,
-		Mismatch: roleInfo.Mismatch,
-		CwdRole:  roleInfo.CwdRole,
-	}
-
-	// Compute identity string
-	ctx := RoleContext{
-		Role:     roleInfo.Role,
-		Rig:      roleInfo.Rig,
-		Polecat:  roleInfo.Polecat,
-		TownRoot: townRoot,
-		WorkDir:  cwd,
-	}
-	state.Identity = getAgentIdentity(ctx)
-
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(state)
 }
 
 func outputPrimeContext(ctx RoleContext) error {
@@ -1161,49 +1068,44 @@ func outputRefineryPatrolContext(ctx RoleContext) {
 	outputPatrolContext(cfg)
 }
 
-// findHookedBead returns the bead currently on an agent's hook, if any.
-// It checks both "hooked" status and "in_progress" status (for interrupted sessions
-// where work was claimed but the session was interrupted before completion).
-// Returns nil if no hooked bead is found.
-func findHookedBead(ctx RoleContext) *beads.Issue {
+// checkSlungWork checks for hooked work on the agent's hook.
+// If found, displays AUTONOMOUS WORK MODE and tells the agent to execute immediately.
+// Returns true if hooked work was found (caller should skip normal startup directive).
+func checkSlungWork(ctx RoleContext) bool {
+	// Determine agent identity
 	agentID := getAgentIdentity(ctx)
 	if agentID == "" {
-		return nil
+		return false
 	}
 
+	// Check for hooked beads (work on the agent's hook)
 	b := beads.New(ctx.WorkDir)
-
-	// Check for hooked beads
 	hookedBeads, err := b.List(beads.ListOptions{
 		Status:   beads.StatusHooked,
 		Assignee: agentID,
 		Priority: -1,
 	})
-	if err == nil && len(hookedBeads) > 0 {
-		return hookedBeads[0]
-	}
-
-	// Also check in_progress beads (for interrupted sessions)
-	inProgressBeads, err := b.List(beads.ListOptions{
-		Status:   "in_progress",
-		Assignee: agentID,
-		Priority: -1,
-	})
-	if err == nil && len(inProgressBeads) > 0 {
-		return inProgressBeads[0]
-	}
-
-	return nil
-}
-
-// checkSlungWork checks for hooked work on the agent's hook.
-// If found, displays AUTONOMOUS WORK MODE and tells the agent to execute immediately.
-// Returns true if hooked work was found (caller should skip normal startup directive).
-func checkSlungWork(ctx RoleContext) bool {
-	hookedBead := findHookedBead(ctx)
-	if hookedBead == nil {
+	if err != nil {
 		return false
 	}
+
+	// If no hooked beads found, also check in_progress beads assigned to this agent.
+	// This handles the case where work was claimed (status changed to in_progress)
+	// but the session was interrupted before completion. The hook should persist.
+	if len(hookedBeads) == 0 {
+		inProgressBeads, err := b.List(beads.ListOptions{
+			Status:   "in_progress",
+			Assignee: agentID,
+			Priority: -1,
+		})
+		if err != nil || len(inProgressBeads) == 0 {
+			return false
+		}
+		hookedBeads = inProgressBeads
+	}
+
+	// Use the first hooked bead (agents typically have one)
+	hookedBead := hookedBeads[0]
 
 	// Build the role announcement string
 	roleAnnounce := buildRoleAnnouncement(ctx)
@@ -1871,10 +1773,30 @@ func detectSessionState(ctx RoleContext) SessionState {
 	}
 
 	// Check for hooked work (autonomous state)
-	if hookedBead := findHookedBead(ctx); hookedBead != nil {
-		state.State = "autonomous"
-		state.HookedBead = hookedBead.ID
-		return state
+	agentID := getAgentIdentity(ctx)
+	if agentID != "" {
+		b := beads.New(ctx.WorkDir)
+		hookedBeads, err := b.List(beads.ListOptions{
+			Status:   beads.StatusHooked,
+			Assignee: agentID,
+			Priority: -1,
+		})
+		if err == nil && len(hookedBeads) > 0 {
+			state.State = "autonomous"
+			state.HookedBead = hookedBeads[0].ID
+			return state
+		}
+		// Also check in_progress beads
+		inProgressBeads, err := b.List(beads.ListOptions{
+			Status:   "in_progress",
+			Assignee: agentID,
+			Priority: -1,
+		})
+		if err == nil && len(inProgressBeads) > 0 {
+			state.State = "autonomous"
+			state.HookedBead = inProgressBeads[0].ID
+			return state
+		}
 	}
 
 	return state

@@ -149,6 +149,20 @@ func (c *PrimingCheck) checkAgentPriming(townRoot, agentDir, agentType string) [
 		}
 	}
 
+	// Check AGENTS.md is minimal (bootstrap pointer, not full context)
+	agentsMdPath := filepath.Join(agentPath, "AGENTS.md")
+	if fileExists(agentsMdPath) {
+		lines := c.countLines(agentsMdPath)
+		if lines > 20 {
+			issues = append(issues, primingIssue{
+				location:    agentDir,
+				issueType:   "large_agents_md",
+				description: fmt.Sprintf("AGENTS.md has %d lines (should be <20 for bootstrap pointer)", lines),
+				fixable:     false, // Full context should come from gt prime templates
+			})
+		}
+	}
+
 	return issues
 }
 
