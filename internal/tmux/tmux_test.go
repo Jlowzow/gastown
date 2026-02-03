@@ -837,6 +837,17 @@ func TestCleanupOrphanedSessions(t *testing.T) {
 
 	tm := NewTmux()
 
+	// SAFETY: Skip if production GT sessions exist to avoid killing real agents.
+	// This test calls CleanupOrphanedSessions() which kills ALL gt-*/hq-* sessions
+	// that appear orphaned. In a dev environment with running agents, this is destructive.
+	sessions, _ := tm.ListSessions()
+	for _, sess := range sessions {
+		if (strings.HasPrefix(sess, "gt-") || strings.HasPrefix(sess, "hq-")) &&
+			sess != "gt-test-cleanup-rig" && sess != "hq-test-cleanup" {
+			t.Skip("Skipping: production GT sessions exist (would be killed by CleanupOrphanedSessions)")
+		}
+	}
+
 	// Create test sessions with gt- and hq- prefixes (zombie sessions - no Claude running)
 	gtSession := "gt-test-cleanup-rig"
 	hqSession := "hq-test-cleanup"
@@ -913,6 +924,14 @@ func TestCleanupOrphanedSessions_NoSessions(t *testing.T) {
 	}
 
 	tm := NewTmux()
+
+	// SAFETY: Skip if production GT sessions exist to avoid killing real agents.
+	sessions, _ := tm.ListSessions()
+	for _, sess := range sessions {
+		if strings.HasPrefix(sess, "gt-") || strings.HasPrefix(sess, "hq-") {
+			t.Skip("Skipping: GT sessions exist (CleanupOrphanedSessions would kill them)")
+		}
+	}
 
 	// Running cleanup with no orphaned GT sessions should return 0, no error
 	cleaned, err := tm.CleanupOrphanedSessions()
