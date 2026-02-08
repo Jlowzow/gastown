@@ -1082,15 +1082,10 @@ func runPolecatGC(cmd *cobra.Command, args []string) error {
 // splitLines splits a string into non-empty lines.
 func splitLines(s string) []string {
 	var lines []string
-	for _, line := range filepath.SplitList(s) {
+	for _, line := range strings.Split(s, "\n") {
 		if line != "" {
 			lines = append(lines, line)
 		}
-	}
-	// filepath.SplitList doesn't work for newlines, use strings.Split instead
-	lines = nil
-	for _, line := range strings.Split(s, "\n") {
-		lines = append(lines, line)
 	}
 	return lines
 }
