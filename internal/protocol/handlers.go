@@ -78,17 +78,26 @@ func WrapWitnessHandlers(h WitnessHandler) *HandlerRegistry {
 	registry := NewHandlerRegistry()
 
 	registry.Register(TypeMerged, func(msg *mail.Message) error {
-		payload := ParseMergedPayload(msg.Body)
+		payload, err := ParseMergedPayload(msg.Body)
+		if err != nil {
+			return err
+		}
 		return h.HandleMerged(payload)
 	})
 
 	registry.Register(TypeMergeFailed, func(msg *mail.Message) error {
-		payload := ParseMergeFailedPayload(msg.Body)
+		payload, err := ParseMergeFailedPayload(msg.Body)
+		if err != nil {
+			return err
+		}
 		return h.HandleMergeFailed(payload)
 	})
 
 	registry.Register(TypeReworkRequest, func(msg *mail.Message) error {
-		payload := ParseReworkRequestPayload(msg.Body)
+		payload, err := ParseReworkRequestPayload(msg.Body)
+		if err != nil {
+			return err
+		}
 		return h.HandleReworkRequest(payload)
 	})
 
@@ -100,7 +109,10 @@ func WrapRefineryHandlers(h RefineryHandler) *HandlerRegistry {
 	registry := NewHandlerRegistry()
 
 	registry.Register(TypeMergeReady, func(msg *mail.Message) error {
-		payload := ParseMergeReadyPayload(msg.Body)
+		payload, err := ParseMergeReadyPayload(msg.Body)
+		if err != nil {
+			return err
+		}
 		return h.HandleMergeReady(payload)
 	})
 
