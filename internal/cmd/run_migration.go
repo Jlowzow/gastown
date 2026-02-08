@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -43,6 +44,7 @@ var (
 	runMigrationDryRun  bool
 	runMigrationStep    string
 	runMigrationVerbose bool
+	runMigrationTimeout time.Duration
 )
 
 var runMigrationCmd = &cobra.Command{
@@ -83,6 +85,7 @@ func init() {
 	runMigrationCmd.Flags().BoolVar(&runMigrationDryRun, "dry-run", false, "Preview execution plan without running")
 	runMigrationCmd.Flags().StringVar(&runMigrationStep, "step", "", "Run a specific step (skip dependency check)")
 	runMigrationCmd.Flags().BoolVarP(&runMigrationVerbose, "verbose", "v", false, "Show step output in detail")
+	runMigrationCmd.Flags().DurationVar(&runMigrationTimeout, "timeout", 5*time.Minute, "Timeout per migration step (e.g. 10m, 30s)")
 
 	rootCmd.AddCommand(runMigrationCmd)
 }
@@ -357,11 +360,13 @@ func executeMigrationStep(_ *formula.Formula, cp *MigrationCheckpoint, step *for
 				fmt.Printf("    %s %s\n", style.Dim.Render("$"), cmdStr)
 			}
 
-			c := exec.Command("bash", "-c", cmdStr)
+			ctx, cancel := context.WithTimeout(context.Background(), runMigrationTimeout)
+			c := exec.CommandContext(ctx, "bash", "-c", cmdStr)
 			c.Dir = townRoot
 			c.Env = append(os.Environ(), "GT_MIGRATION=1")
 
 			output, err := c.CombinedOutput()
+			cancel()
 			outputStr := strings.TrimSpace(string(output))
 
 			if runMigrationVerbose && outputStr != "" {
@@ -372,13 +377,22 @@ func executeMigrationStep(_ *formula.Formula, cp *MigrationCheckpoint, step *for
 			}
 
 			if err != nil {
+				// Distinguish timeout from other failures
+				errMsg := fmt.Sprintf("command failed: %s\nerror: %v\noutput: %s", cmdStr, err, outputStr)
+				if ctx.Err() == context.DeadlineExceeded {
+					errMsg = fmt.Sprintf("command timed out after %s: %s\noutput: %s", runMigrationTimeout, cmdStr, outputStr)
+				}
+
 				// Update checkpoint: step failed
 				sr.Status = "failed"
-				sr.Error = fmt.Sprintf("command failed: %s\nerror: %v\noutput: %s", cmdStr, err, outputStr)
+				sr.Error = errMsg
 				sr.CompletedAt = time.Now()
 				cp.Steps[step.ID] = sr
 				_ = saveMigrationCheckpoint(townRoot, cp)
 
+				if ctx.Err() == context.DeadlineExceeded {
+					return fmt.Errorf("command timed out after %s: %s\n  output: %s", runMigrationTimeout, cmdStr, truncateOutput(outputStr, 500))
+				}
 				return fmt.Errorf("command failed: %s\n  %v\n  output: %s", cmdStr, err, truncateOutput(outputStr, 500))
 			}
 

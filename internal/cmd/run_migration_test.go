@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/formula"
 )
 
 func TestExtractCommands(t *testing.T) {
@@ -655,5 +657,88 @@ func TestCheckpoint_JSONStructure(t *testing.T) {
 		if _, ok := raw[field]; !ok {
 			t.Errorf("missing required field %q in checkpoint JSON", field)
 		}
+	}
+}
+
+func TestExecuteMigrationStep_Timeout(t *testing.T) {
+	townRoot := t.TempDir()
+
+	// Save and restore global timeout
+	origTimeout := runMigrationTimeout
+	runMigrationTimeout = 500 * time.Millisecond
+	defer func() { runMigrationTimeout = origTimeout }()
+
+	cp := &MigrationCheckpoint{
+		TownRoot:  townRoot,
+		StartedAt: time.Now(),
+		Steps:     make(map[string]StepRun),
+	}
+
+	step := &formula.Step{
+		ID:    "slow-step",
+		Title: "Step that should time out",
+		Description: "Run a slow command.\n\n```bash\nsleep 30\n```\n",
+	}
+
+	start := time.Now()
+	err := executeMigrationStep(nil, cp, step, townRoot)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("expected timeout error message, got: %v", err)
+	}
+
+	// Should have returned quickly (within 2s), not waited for sleep 30
+	if elapsed > 5*time.Second {
+		t.Errorf("timeout took too long: %v (expected ~500ms)", elapsed)
+	}
+
+	// Checkpoint should record the failure
+	sr, ok := cp.Steps["slow-step"]
+	if !ok {
+		t.Fatal("step not recorded in checkpoint")
+	}
+	if sr.Status != "failed" {
+		t.Errorf("step status = %q, want failed", sr.Status)
+	}
+	if !strings.Contains(sr.Error, "timed out") {
+		t.Errorf("checkpoint error should mention timeout, got: %s", sr.Error)
+	}
+}
+
+func TestExecuteMigrationStep_NoTimeout(t *testing.T) {
+	townRoot := t.TempDir()
+
+	// Save and restore global timeout
+	origTimeout := runMigrationTimeout
+	runMigrationTimeout = 5 * time.Second
+	defer func() { runMigrationTimeout = origTimeout }()
+
+	cp := &MigrationCheckpoint{
+		TownRoot:  townRoot,
+		StartedAt: time.Now(),
+		Steps:     make(map[string]StepRun),
+	}
+
+	step := &formula.Step{
+		ID:    "fast-step",
+		Title: "Step that completes quickly",
+		Description: "Run a fast command.\n\n```bash\necho hello\n```\n",
+	}
+
+	err := executeMigrationStep(nil, cp, step, townRoot)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	sr, ok := cp.Steps["fast-step"]
+	if !ok {
+		t.Fatal("step not recorded in checkpoint")
+	}
+	if sr.Status != "completed" {
+		t.Errorf("step status = %q, want completed", sr.Status)
 	}
 }
