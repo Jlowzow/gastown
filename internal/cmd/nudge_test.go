@@ -135,6 +135,64 @@ func TestResolveNudgePattern(t *testing.T) {
 	}
 }
 
+func TestSessionNameToAddress(t *testing.T) {
+	tests := []struct {
+		name        string
+		sessionName string
+		expected    string
+	}{
+		{
+			name:        "mayor",
+			sessionName: "hq-mayor",
+			expected:    "mayor",
+		},
+		{
+			name:        "deacon",
+			sessionName: "hq-deacon",
+			expected:    "deacon",
+		},
+		{
+			name:        "witness",
+			sessionName: "gt-gastown-witness",
+			expected:    "gastown/witness",
+		},
+		{
+			name:        "refinery",
+			sessionName: "gt-gastown-refinery",
+			expected:    "gastown/refinery",
+		},
+		{
+			name:        "crew member",
+			sessionName: "gt-gastown-crew-max",
+			expected:    "gastown/crew/max",
+		},
+		{
+			name:        "polecat",
+			sessionName: "gt-gastown-alpha",
+			expected:    "gastown/alpha",
+		},
+		{
+			name:        "unrecognized format",
+			sessionName: "random-session",
+			expected:    "",
+		},
+		{
+			name:        "gt prefix but no rig",
+			sessionName: "gt-",
+			expected:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sessionNameToAddress(tt.sessionName)
+			if got != tt.expected {
+				t.Errorf("sessionNameToAddress(%q) = %q, want %q", tt.sessionName, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestIfFreshMaxAge(t *testing.T) {
 	// Verify the constant is 60 seconds as specified in the design.
 	if ifFreshMaxAge != 60*time.Second {

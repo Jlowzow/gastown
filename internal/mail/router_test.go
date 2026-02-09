@@ -974,3 +974,76 @@ func TestValidateRecipient(t *testing.T) {
 		})
 	}
 }
+
+func TestAddressToAgentBeadID(t *testing.T) {
+	tests := []struct {
+		name     string
+		address  string
+		expected string
+	}{
+		{
+			name:     "overseer returns empty",
+			address:  "overseer",
+			expected: "",
+		},
+		{
+			name:     "mayor",
+			address:  "mayor/",
+			expected: "hq-mayor",
+		},
+		{
+			name:     "mayor without slash",
+			address:  "mayor",
+			expected: "hq-mayor",
+		},
+		{
+			name:     "deacon",
+			address:  "deacon/",
+			expected: "hq-deacon",
+		},
+		{
+			name:     "witness",
+			address:  "gastown/witness",
+			expected: "gt-gastown-witness",
+		},
+		{
+			name:     "refinery",
+			address:  "gastown/refinery",
+			expected: "gt-gastown-refinery",
+		},
+		{
+			name:     "crew member",
+			address:  "gastown/crew/max",
+			expected: "gt-gastown-crew-max",
+		},
+		{
+			name:     "polecat (default)",
+			address:  "gastown/alpha",
+			expected: "gt-gastown-polecat-alpha",
+		},
+		{
+			name:     "empty address",
+			address:  "",
+			expected: "",
+		},
+		{
+			name:     "no slash non-special",
+			address:  "unknown",
+			expected: "",
+		},
+		{
+			name:     "rig with empty target",
+			address:  "gastown/",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := addressToAgentBeadID(tt.address)
+			if got != tt.expected {
+				t.Errorf("addressToAgentBeadID(%q) = %q, want %q", tt.address, got, tt.expected)
+			}
+		})
+	}
+}

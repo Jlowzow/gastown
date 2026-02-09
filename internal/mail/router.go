@@ -1196,7 +1196,15 @@ func (r *Router) GetMailbox(address string) (*Mailbox, error) {
 // notifyRecipient sends a notification to a recipient's tmux session.
 // Uses NudgeSession to add the notification to the agent's conversation history.
 // Supports mayor/, deacon/, rig/crew/name, rig/polecats/name, and rig/name addresses.
+// Respects agent DND/muted state - skips notification if recipient has DND enabled.
 func (r *Router) notifyRecipient(msg *Message) error {
+	// Check DND status before attempting notification
+	if r.townRoot != "" {
+		if muted, _ := r.isRecipientMuted(msg.To); muted {
+			return nil // Recipient has DND enabled, skip notification
+		}
+	}
+
 	sessionIDs := addressToSessionIDs(msg.To)
 	if len(sessionIDs) == 0 {
 		return nil // Unable to determine session ID
@@ -1223,6 +1231,57 @@ func (r *Router) notifyRecipient(msg *Message) error {
 	}
 
 	return nil // No active session found
+}
+
+// isRecipientMuted checks if a mail recipient has DND/muted notifications enabled.
+// Returns true if the recipient is muted and should not receive tmux nudges.
+// Fails open (returns false) if the agent bead cannot be found.
+func (r *Router) isRecipientMuted(address string) (bool, error) {
+	agentBeadID := addressToAgentBeadID(address)
+	if agentBeadID == "" {
+		return false, nil // Can't determine agent bead, allow notification
+	}
+
+	bd := beads.New(r.townRoot)
+	level, err := bd.GetAgentNotificationLevel(agentBeadID)
+	if err != nil {
+		return false, nil // Agent bead might not exist, allow notification
+	}
+
+	return level == beads.NotifyMuted, nil
+}
+
+// addressToAgentBeadID converts a mail address to an agent bead ID for DND lookup.
+// Returns empty string if the address cannot be converted.
+func addressToAgentBeadID(address string) string {
+	switch {
+	case address == "overseer":
+		return "" // Overseer is a human, no agent bead
+	case strings.HasPrefix(address, "mayor"):
+		return session.MayorSessionName()
+	case strings.HasPrefix(address, "deacon"):
+		return session.DeaconSessionName()
+	}
+
+	parts := strings.SplitN(address, "/", 2)
+	if len(parts) != 2 || parts[1] == "" {
+		return ""
+	}
+
+	rig := parts[0]
+	target := parts[1]
+
+	switch {
+	case target == "witness":
+		return fmt.Sprintf("gt-%s-witness", rig)
+	case target == "refinery":
+		return fmt.Sprintf("gt-%s-refinery", rig)
+	case strings.HasPrefix(target, "crew/"):
+		crewName := strings.TrimPrefix(target, "crew/")
+		return fmt.Sprintf("gt-%s-crew-%s", rig, crewName)
+	default:
+		return fmt.Sprintf("gt-%s-polecat-%s", rig, target)
+	}
 }
 
 // addressToSessionIDs converts a mail address to possible tmux session IDs.

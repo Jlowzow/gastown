@@ -364,12 +364,23 @@ func runNudgeChannel(channelName, message string) error {
 
 	// Send nudges
 	t := tmux.NewTmux()
-	var succeeded, failed int
+	var succeeded, failed, skipped int
 	var failures []string
 
 	fmt.Printf("Nudging channel %q (%d target(s))...\n\n", channelName, len(targets))
 
 	for i, sessionName := range targets {
+		// Check DND status before nudging each target
+		// Convert session name back to address format for DND lookup
+		targetAddr := sessionNameToAddress(sessionName)
+		if targetAddr != "" {
+			if shouldSend, level, _ := shouldNudgeTarget(townRoot, targetAddr, false); !shouldSend {
+				skipped++
+				fmt.Printf("  %s %s (DND: %s)\n", style.Dim.Render("○"), sessionName, level)
+				continue
+			}
+		}
+
 		if err := t.NudgeSession(sessionName, prefixedMessage); err != nil {
 			failed++
 			failures = append(failures, fmt.Sprintf("%s: %v", sessionName, err))
@@ -391,15 +402,22 @@ func runNudgeChannel(channelName, message string) error {
 	_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload("", "channel:"+channelName, message))
 
 	if failed > 0 {
-		fmt.Printf("%s Channel nudge complete: %d succeeded, %d failed\n",
-			style.WarningPrefix, succeeded, failed)
+		summary := fmt.Sprintf("Channel nudge complete: %d succeeded, %d failed", succeeded, failed)
+		if skipped > 0 {
+			summary += fmt.Sprintf(", %d skipped (DND)", skipped)
+		}
+		fmt.Printf("%s %s\n", style.WarningPrefix, summary)
 		for _, f := range failures {
 			fmt.Printf("  %s\n", style.Dim.Render(f))
 		}
 		return fmt.Errorf("%d nudge(s) failed", failed)
 	}
 
-	fmt.Printf("%s Channel nudge complete: %d target(s) nudged\n", style.SuccessPrefix, succeeded)
+	summary := fmt.Sprintf("Channel nudge complete: %d target(s) nudged", succeeded)
+	if skipped > 0 {
+		summary += fmt.Sprintf(", %d skipped (DND)", skipped)
+	}
+	fmt.Printf("%s %s\n", style.SuccessPrefix, summary)
 	return nil
 }
 
@@ -502,6 +520,53 @@ func shouldNudgeTarget(townRoot, targetAddress string, force bool) (bool, string
 
 	// Allow nudge if level is not muted
 	return level != beads.NotifyMuted, level, nil
+}
+
+// sessionNameToAddress converts a tmux session name back to a mail address
+// for DND lookup. Returns empty string if the format is unrecognized.
+// Examples:
+//   - "gt-gastown-crew-max" -> "gastown/crew/max"
+//   - "gt-gastown-alpha" -> "gastown/alpha"
+//   - "gt-gastown-witness" -> "gastown/witness"
+//   - "hq-mayor" -> "mayor"
+//   - "hq-deacon" -> "deacon"
+func sessionNameToAddress(sessionName string) string {
+	if sessionName == session.MayorSessionName() {
+		return "mayor"
+	}
+	if sessionName == session.DeaconSessionName() {
+		return "deacon"
+	}
+
+	// Expected format: gt-<rig>-<rest>
+	if !strings.HasPrefix(sessionName, "gt-") {
+		return ""
+	}
+	rest := strings.TrimPrefix(sessionName, "gt-")
+
+	// Try to split into rig and target components
+	// Format: rig-crew-name or rig-witness or rig-refinery or rig-name
+	parts := strings.SplitN(rest, "-", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+
+	rig := parts[0]
+	target := parts[1]
+
+	// Check for crew prefix: crew-<name>
+	if strings.HasPrefix(target, "crew-") {
+		crewName := strings.TrimPrefix(target, "crew-")
+		return fmt.Sprintf("%s/crew/%s", rig, crewName)
+	}
+
+	// Infrastructure roles
+	if target == "witness" || target == "refinery" {
+		return fmt.Sprintf("%s/%s", rig, target)
+	}
+
+	// Polecat (simple name after rig)
+	return fmt.Sprintf("%s/%s", rig, target)
 }
 
 // addressToAgentBeadID converts a target address to an agent bead ID.
