@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -483,6 +484,9 @@ func TestCurator_ReadRecentFeedEventsLargeFile(t *testing.T) {
 }
 
 func TestCurator_FeedFilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permissions are not supported on Windows")
+	}
 	tmpDir := t.TempDir()
 	feedPath := filepath.Join(tmpDir, FeedFile)
 

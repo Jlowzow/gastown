@@ -407,6 +407,9 @@ func (c *Curator) truncateFeedFile(feedPath string, currentSize int64) {
 	}
 	tmp.Close()
 
+	// Close the read handle before rename — Windows cannot rename over open files.
+	f.Close()
+
 	// Atomic replace
 	os.Rename(tmpPath, feedPath) //nolint:errcheck // best-effort truncation
 }
