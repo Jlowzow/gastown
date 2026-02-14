@@ -829,9 +829,6 @@ func runConvoyStranded(cmd *cobra.Command, args []string) error {
 func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 	stranded := []strandedConvoyInfo{} // Initialize as empty slice for proper JSON encoding
 
-	// Get blocked issues (we need this to filter out blocked issues)
-	blockedIssues := getBlockedIssueIDs()
-
 	// List all open convoys
 	listArgs := []string{"list", "--type=convoy", "--status=open", "--json"}
 	listCmd := exec.Command("bd", listArgs...)
@@ -865,7 +862,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 		// Find ready issues (open, not blocked, no live assignee)
 		var readyIssues []string
 		for _, t := range tracked {
-			if isReadyIssue(t, blockedIssues) {
+			if isReadyIssue(t) {
 				readyIssues = append(readyIssues, t.ID)
 			}
 		}
@@ -883,46 +880,19 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 	return stranded, nil
 }
 
-// getBlockedIssueIDs returns a set of issue IDs that are currently blocked.
-func getBlockedIssueIDs() map[string]bool {
-	blocked := make(map[string]bool)
-
-	// Run bd blocked --json
-	blockedCmd := exec.Command("bd", "blocked", "--json")
-	var stdout bytes.Buffer
-	blockedCmd.Stdout = &stdout
-
-	if err := blockedCmd.Run(); err != nil {
-		return blocked // Return empty set on error
-	}
-
-	var issues []struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &issues); err != nil {
-		return blocked
-	}
-
-	for _, issue := range issues {
-		blocked[issue.ID] = true
-	}
-
-	return blocked
-}
-
 // isReadyIssue checks if an issue is ready for dispatch (stranded).
 // An issue is ready if:
 // - status = "open" AND (no assignee OR assignee session is dead)
 // - OR status = "in_progress"/"hooked" AND assignee session is dead (orphaned molecule)
-// - AND not in blocked set
-func isReadyIssue(t trackedIssueInfo, blockedIssues map[string]bool) bool {
+// - AND not blocked (cross-rig-aware from issue details)
+func isReadyIssue(t trackedIssueInfo) bool {
 	// Closed issues are never ready
 	if t.Status == "closed" || t.Status == "tombstone" {
 		return false
 	}
 
 	// Must not be blocked
-	if blockedIssues[t.ID] {
+	if t.Blocked {
 		return false
 	}
 
@@ -1437,9 +1407,22 @@ type trackedIssueInfo struct {
 	Status    string `json:"status"`
 	Type      string `json:"dependency_type"`
 	IssueType string `json:"issue_type"`
+	Blocked   bool   `json:"blocked,omitempty"`    // True if issue currently has blockers
 	Assignee  string `json:"assignee,omitempty"`   // Assigned agent (e.g., gastown/polecats/goose)
 	Worker    string `json:"worker,omitempty"`     // Worker currently assigned (e.g., gastown/nux)
 	WorkerAge string `json:"worker_age,omitempty"` // How long worker has been on this issue
+}
+
+// trackedDependency is dep-list data enriched with fresh issue details.
+type trackedDependency struct {
+	ID             string   `json:"id"`
+	Title          string   `json:"title"`
+	Status         string   `json:"status"`
+	IssueType      string   `json:"issue_type"`
+	Assignee       string   `json:"assignee"`
+	DependencyType string   `json:"dependency_type"`
+	Labels         []string `json:"labels"`
+	Blocked        bool     `json:"-"`
 }
 
 // extractIssueID strips the external:prefix:id wrapper from bead IDs.
@@ -1453,6 +1436,20 @@ func extractIssueID(id string) string {
 		}
 	}
 	return id
+}
+
+func applyFreshIssueDetails(dep *trackedDependency, details *issueDetails) {
+	dep.Status = details.Status
+	dep.Blocked = details.IsBlocked()
+	if dep.Title == "" {
+		dep.Title = details.Title
+	}
+	if dep.Assignee == "" {
+		dep.Assignee = details.Assignee
+	}
+	if dep.IssueType == "" {
+		dep.IssueType = details.IssueType
+	}
 }
 
 // getTrackedIssues uses bd dep list to get issues tracked by a convoy.
@@ -1471,15 +1468,7 @@ func getTrackedIssues(townBeads, convoyID string) ([]trackedIssueInfo, error) {
 	}
 
 	// Parse the JSON output - bd dep list returns full issue details
-	var deps []struct {
-		ID             string   `json:"id"`
-		Title          string   `json:"title"`
-		Status         string   `json:"status"`
-		IssueType      string   `json:"issue_type"`
-		Assignee       string   `json:"assignee"`
-		DependencyType string   `json:"dependency_type"`
-		Labels         []string `json:"labels"`
-	}
+	var deps []trackedDependency
 	if err := json.Unmarshal(stdout.Bytes(), &deps); err != nil {
 		return nil, fmt.Errorf("parsing tracked issues for %s: %w", convoyID, err)
 	}
@@ -1499,16 +1488,7 @@ func getTrackedIssues(townBeads, convoyID string) ([]trackedIssueInfo, error) {
 	freshDetails := getIssueDetailsBatch(issueIDs)
 	for i, dep := range deps {
 		if details, ok := freshDetails[dep.ID]; ok {
-			deps[i].Status = details.Status
-			if deps[i].Title == "" {
-				deps[i].Title = details.Title
-			}
-			if deps[i].Assignee == "" {
-				deps[i].Assignee = details.Assignee
-			}
-			if deps[i].IssueType == "" {
-				deps[i].IssueType = details.IssueType
-			}
+			applyFreshIssueDetails(&deps[i], details)
 		}
 	}
 
@@ -1530,6 +1510,7 @@ func getTrackedIssues(townBeads, convoyID string) ([]trackedIssueInfo, error) {
 			Status:    dep.Status,
 			Type:      dep.DependencyType,
 			IssueType: dep.IssueType,
+			Blocked:   dep.Blocked,
 			Assignee:  dep.Assignee,
 		}
 
@@ -1543,6 +1524,35 @@ func getTrackedIssues(townBeads, convoyID string) ([]trackedIssueInfo, error) {
 	}
 
 	return tracked, nil
+}
+
+type issueDependency struct {
+	Status         string `json:"status"`
+	DependencyType string `json:"dependency_type"`
+}
+
+type issueDetailsJSON struct {
+	ID             string            `json:"id"`
+	Title          string            `json:"title"`
+	Status         string            `json:"status"`
+	IssueType      string            `json:"issue_type"`
+	Assignee       string            `json:"assignee"`
+	BlockedBy      []string          `json:"blocked_by"`
+	BlockedByCount int               `json:"blocked_by_count"`
+	Dependencies   []issueDependency `json:"dependencies"`
+}
+
+func (issue issueDetailsJSON) toIssueDetails() *issueDetails {
+	return &issueDetails{
+		ID:             issue.ID,
+		Title:          issue.Title,
+		Status:         issue.Status,
+		IssueType:      issue.IssueType,
+		Assignee:       issue.Assignee,
+		BlockedBy:      issue.BlockedBy,
+		BlockedByCount: issue.BlockedByCount,
+		Dependencies:   issue.Dependencies,
+	}
 }
 
 // getExternalIssueDetails fetches issue details from an external rig database.
@@ -1573,13 +1583,7 @@ func getExternalIssueDetails(townBeads, rigName, issueID string) *issueDetails {
 		return nil
 	}
 
-	var issues []struct {
-		ID        string `json:"id"`
-		Title     string `json:"title"`
-		Status    string `json:"status"`
-		IssueType string `json:"issue_type"`
-		Assignee  string `json:"assignee"`
-	}
+	var issues []issueDetailsJSON
 	if err := json.Unmarshal(stdout.Bytes(), &issues); err != nil {
 		return nil
 	}
@@ -1587,23 +1591,34 @@ func getExternalIssueDetails(townBeads, rigName, issueID string) *issueDetails {
 		return nil
 	}
 
-	issue := issues[0]
-	return &issueDetails{
-		ID:        issue.ID,
-		Title:     issue.Title,
-		Status:    issue.Status,
-		IssueType: issue.IssueType,
-		Assignee:  issue.Assignee,
-	}
+	return issues[0].toIssueDetails()
 }
 
 // issueDetails holds basic issue info.
 type issueDetails struct {
-	ID        string
-	Title     string
-	Status    string
-	IssueType string
-	Assignee  string
+	ID             string
+	Title          string
+	Status         string
+	IssueType      string
+	Assignee       string
+	BlockedBy      []string
+	BlockedByCount int
+	Dependencies   []issueDependency
+}
+
+func (d issueDetails) IsBlocked() bool {
+	if d.BlockedByCount > 0 || len(d.BlockedBy) > 0 {
+		return true
+	}
+
+	// bd show can omit blocked_by_count; fall back to live dependency edges.
+	for _, dep := range d.Dependencies {
+		if dep.DependencyType == "blocks" && dep.Status != "closed" && dep.Status != "tombstone" {
+			return true
+		}
+	}
+
+	return false
 }
 
 // getIssueDetailsBatch fetches details for multiple issues in a single bd show call.
@@ -1633,25 +1648,13 @@ func getIssueDetailsBatch(issueIDs []string) map[string]*issueDetails {
 		return result
 	}
 
-	var issues []struct {
-		ID        string `json:"id"`
-		Title     string `json:"title"`
-		Status    string `json:"status"`
-		IssueType string `json:"issue_type"`
-		Assignee  string `json:"assignee"`
-	}
+	var issues []issueDetailsJSON
 	if err := json.Unmarshal(stdout.Bytes(), &issues); err != nil {
 		return result
 	}
 
 	for _, issue := range issues {
-		result[issue.ID] = &issueDetails{
-			ID:        issue.ID,
-			Title:     issue.Title,
-			Status:    issue.Status,
-			IssueType: issue.IssueType,
-			Assignee:  issue.Assignee,
-		}
+		result[issue.ID] = issue.toIssueDetails()
 	}
 
 	return result
@@ -1673,24 +1676,12 @@ func getIssueDetails(issueID string) *issueDetails {
 		return nil
 	}
 
-	var issues []struct {
-		ID        string `json:"id"`
-		Title     string `json:"title"`
-		Status    string `json:"status"`
-		IssueType string `json:"issue_type"`
-		Assignee  string `json:"assignee"`
-	}
+	var issues []issueDetailsJSON
 	if err := json.Unmarshal(stdout.Bytes(), &issues); err != nil || len(issues) == 0 {
 		return nil
 	}
 
-	return &issueDetails{
-		ID:        issues[0].ID,
-		Title:     issues[0].Title,
-		Status:    issues[0].Status,
-		IssueType: issues[0].IssueType,
-		Assignee:  issues[0].Assignee,
-	}
+	return issues[0].toIssueDetails()
 }
 
 // workerInfo holds info about a worker assigned to an issue.
