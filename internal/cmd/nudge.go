@@ -66,7 +66,11 @@ Delivery modes (--mode):
   queue      Write to a file queue; agent picks up via hook at next turn
              boundary. Zero interruption. Use for non-urgent coordination.
   wait-idle  Wait for agent to become idle (prompt visible), then deliver
-             directly. Falls back to queue on timeout.
+             directly. Falls back to queue on timeout. If both idle-wait and
+             queue fail, falls back to immediate delivery as a last resort.
+
+Queue and wait-idle modes require the target agent to support hooks
+(UserPromptSubmit) for drain. Agents without hook support should use immediate.
 
 The default is immediate for backward compatibility. For non-urgent messages
 where you don't want to interrupt the agent's current work, use --mode=queue.
@@ -353,6 +357,19 @@ func runNudge(cmd *cobra.Command, args []string) error {
 					return err
 				}
 				sessionName = mgr.SessionName(polecatName)
+			}
+		}
+
+		// For queue/wait-idle modes, verify session exists before enqueuing.
+		// Without this, queue mode silently succeeds for nonexistent sessions —
+		// the file is written but never drained.
+		if nudgeModeFlag != NudgeModeImmediate {
+			exists, err := t.HasSession(sessionName)
+			if err != nil {
+				return fmt.Errorf("checking session: %w", err)
+			}
+			if !exists {
+				return fmt.Errorf("session %q not found (cannot queue nudge for nonexistent session)", sessionName)
 			}
 		}
 

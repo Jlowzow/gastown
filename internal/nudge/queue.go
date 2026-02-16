@@ -145,9 +145,11 @@ func Drain(townRoot, session string) ([]QueuedNudge, error) {
 		return nil, fmt.Errorf("reading nudge queue: %w", err)
 	}
 
-	// Sweep orphaned .claimed files from crashed drainers.
+	// Requeue orphaned .claimed files from crashed drainers.
 	// A .claimed file older than staleClaimThreshold is certainly orphaned —
-	// normal processing completes in milliseconds.
+	// normal processing completes in milliseconds. We rename it back to .json
+	// so it gets picked up on this or a future Drain call, rather than deleting
+	// it (which would permanently drop the nudge).
 	now := time.Now()
 	for _, entry := range entries {
 		if !strings.HasSuffix(entry.Name(), ".claimed") {
@@ -159,8 +161,12 @@ func Drain(townRoot, session string) ([]QueuedNudge, error) {
 		}
 		if now.Sub(info.ModTime()) > staleClaimThreshold {
 			orphanPath := filepath.Join(dir, entry.Name())
-			if err := os.Remove(orphanPath); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to remove orphaned claim %s: %v\n", entry.Name(), err)
+			// Strip .claimed suffix to restore the original .json filename
+			restoredPath := strings.TrimSuffix(orphanPath, ".claimed")
+			if err := os.Rename(orphanPath, restoredPath); err != nil {
+				// Rename failed — remove as last resort to prevent infinite accumulation
+				fmt.Fprintf(os.Stderr, "Warning: failed to requeue orphaned claim %s: %v\n", entry.Name(), err)
+				_ = os.Remove(orphanPath)
 			}
 		}
 	}

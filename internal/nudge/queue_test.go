@@ -407,21 +407,40 @@ func TestDrainSweepsOrphanedClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Drain should sweep the orphaned claim, keep the fresh one, and return the valid nudge
+	// First Drain: requeues the orphaned claim (rename .claimed → .json),
+	// keeps the fresh claim, and returns the valid nudge.
+	// The requeued file isn't in the current ReadDir snapshot, so it's
+	// picked up on the next Drain call.
 	nudges, err := Drain(townRoot, session)
 	if err != nil {
 		t.Fatalf("Drain: %v", err)
 	}
 	if len(nudges) != 1 {
-		t.Fatalf("got %d nudges, want 1", len(nudges))
+		t.Fatalf("first Drain got %d nudges, want 1", len(nudges))
 	}
 	if nudges[0].Message != "valid" {
 		t.Errorf("got message %q, want %q", nudges[0].Message, "valid")
 	}
 
-	// The orphaned (old) claim should have been swept
+	// The orphaned .claimed file should have been requeued as .json
 	if _, err := os.Stat(orphanPath); !os.IsNotExist(err) {
-		t.Error("orphaned .claimed file should have been swept")
+		t.Error("orphaned .claimed file should no longer exist (requeued to .json)")
+	}
+	restoredPath := strings.TrimSuffix(orphanPath, ".claimed")
+	if _, err := os.Stat(restoredPath); os.IsNotExist(err) {
+		t.Error("restored .json file should exist after requeue")
+	}
+
+	// Second Drain: picks up the requeued orphan
+	nudges2, err := Drain(townRoot, session)
+	if err != nil {
+		t.Fatalf("second Drain: %v", err)
+	}
+	if len(nudges2) != 1 {
+		t.Fatalf("second Drain got %d nudges, want 1 (the requeued orphan)", len(nudges2))
+	}
+	if nudges2[0].Sender != "ghost" {
+		t.Errorf("got sender %q, want %q", nudges2[0].Sender, "ghost")
 	}
 
 	// The fresh claim should still exist (not old enough to sweep)

@@ -455,11 +455,10 @@ gt nudge --mode=queue <rig>/witness 'HEALTH_CHECK from deacon'
 gt nudge --mode=queue <rig>/refinery 'HEALTH_CHECK from deacon'
 ```
 
-**Health Ping Benefit**: The nudge commands serve dual purposes:
-1. **Liveness verification** - Agent responds to prove it's alive
-2. **Backoff reset** - Any nudge resets agent's backoff to base interval
-
-This ensures patrol agents remain responsive during active work periods.
+**Health Ping Benefit**: The queued nudge commands serve as a **backoff reset** —
+any nudge resets the agent's backoff to base interval, ensuring patrol agents
+remain responsive during active work periods. Formal liveness verification is
+handled separately by `gt deacon health-check` (which uses immediate delivery).
 
 **Signals to assess:**
 
