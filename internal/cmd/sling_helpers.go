@@ -607,6 +607,9 @@ func CookFormula(formulaName, workDir, townRoot string) error {
 	return cookCmd.Run()
 }
 
+// isHookedAgentDeadFn is a seam for tests. Production uses isHookedAgentDead.
+var isHookedAgentDeadFn = isHookedAgentDead
+
 // isHookedAgentDead checks if the tmux session for a hooked assignee is dead.
 // Used by sling to auto-force re-sling when the previous agent has no active session (gt-pqf9x).
 // Returns true if the session is confirmed dead. Returns false if alive or if we

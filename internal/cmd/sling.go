@@ -287,34 +287,62 @@ func runSling(cmd *cobra.Command, args []string) error {
 	originalAssignee := info.Assignee
 	force := slingForce // local copy to avoid mutating package-level flag
 	if (info.Status == "pinned" || info.Status == "hooked") && !force {
-		target := ""
-		if len(args) > 1 {
-			target = args[1]
-		}
-		selfAgent, _, _, _ := resolveSelfTarget()
-		if matchesSlingTarget(target, info.Assignee, selfAgent) {
-			fmt.Printf("%s Bead %s is already %s to %s, no-op\n",
-				style.Dim.Render("○"), beadID, info.Status, info.Assignee)
-			return nil
-		}
-
 		// Auto-force when hooked agent's session is confirmed dead (gt-pqf9x).
 		// This eliminates the #1 friction in convoy feeding: stale hooks from
 		// dead polecats blocking re-sling without --force.
-		if info.Status == "hooked" && info.Assignee != "" && isHookedAgentDead(info.Assignee) {
+		// IMPORTANT: Stale-hook check must run BEFORE idempotency check so that
+		// a dead polecat with a matching target triggers re-sling, not a no-op.
+		if info.Status == "hooked" && info.Assignee != "" && isHookedAgentDeadFn(info.Assignee) {
 			fmt.Printf("%s Hooked agent %s has no active session, auto-forcing re-sling...\n",
 				style.Warning.Render("⚠"), info.Assignee)
 			force = true
 		} else {
-			assignee := info.Assignee
-			if assignee == "" {
-				assignee = "(unknown)"
+			// Agent is alive (or bead is pinned) — check idempotency before erroring.
+			target := ""
+			if len(args) > 1 {
+				// Batch mode (len(args) > 2) exits earlier at line 231, so
+				// args[len(args)-1] is always the target here.
+				target = args[len(args)-1]
 			}
-			return fmt.Errorf("bead %s is already %s to %s\nUse --force to re-sling", beadID, info.Status, assignee)
+			// Only resolve self-agent when needed (empty/dot target = self-sling).
+			// For explicit targets, idempotency works regardless of cwd/env.
+			selfAgent := ""
+			skipIdempotency := false
+			if target == "" || target == "." {
+				sa, _, _, err := resolveSelfTarget()
+				if err != nil {
+					// Can't determine self — skip idempotency for self-target,
+					// fall through to the existing error path.
+					skipIdempotency = true
+				} else {
+					selfAgent = sa
+				}
+			}
+			if !skipIdempotency && matchesSlingTarget(target, info.Assignee, selfAgent) {
+				if formulaName == "" {
+					// Plain sling to same target: no-op.
+					fmt.Printf("%s Bead %s is already %s to %s, no-op\n",
+						style.Dim.Render("○"), beadID, info.Status, info.Assignee)
+					return nil
+				}
+				// Formula-on-bead with matching target: fall through so
+				// formula instantiation (cook/wisp/bond) runs. The bead
+				// stays hooked/pinned to the same agent — only the formula
+				// work is new. We don't set force=true to avoid triggering
+				// the unhook/reassign path at the force-handler below.
+			} else {
+				assignee := info.Assignee
+				if assignee == "" {
+					assignee = "(unknown)"
+				}
+				return fmt.Errorf("bead %s is already %s to %s\nUse --force to re-sling", beadID, info.Status, assignee)
+			}
 		}
 	}
 
-	// Resolve target agent using shared dispatch logic
+	// Resolve target agent using shared dispatch logic.
+	// Note: args[1] == args[len(args)-1] here because batch mode (len(args) > 2
+	// with rig last arg) exits at line 234. The only remaining case is len(args) <= 2.
 	var target string
 	if len(args) > 1 {
 		target = args[1]

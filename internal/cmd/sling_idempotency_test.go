@@ -29,24 +29,6 @@ func TestMatchesSlingTarget(t *testing.T) {
 			want:     true,
 		},
 		{
-			name:     "dog namespace target matches specific dog assignment",
-			target:   "deacon/dogs",
-			assignee: "deacon/dogs/alpha",
-			want:     true,
-		},
-		{
-			name:     "rig name shorthand matches polecat",
-			target:   "gastown/toast",
-			assignee: "gastown/polecats/toast",
-			want:     true,
-		},
-		{
-			name:     "rig name shorthand matches crew",
-			target:   "gastown/alex",
-			assignee: "gastown/crew/alex",
-			want:     true,
-		},
-		{
 			name:      "self target matches self assignee",
 			target:    ".",
 			assignee:  "gastown/crew/alex",
@@ -70,6 +52,53 @@ func TestMatchesSlingTarget(t *testing.T) {
 			target:   "gastown/polecats/toast",
 			assignee: "",
 			want:     false,
+		},
+		{
+			name:      "empty target with empty selfAgent does not match",
+			target:    "",
+			assignee:  "gastown/polecats/toast",
+			selfAgent: "",
+			want:      false,
+		},
+		{
+			name:      "dot target with empty selfAgent does not match",
+			target:    ".",
+			assignee:  "gastown/polecats/toast",
+			selfAgent: "",
+			want:      false,
+		},
+		{
+			name:      "self target does not match different assignee",
+			target:    ".",
+			assignee:  "gastown/polecats/toast",
+			selfAgent: "gastown/crew/alex",
+			want:      false,
+		},
+		// Shorthand and pool targets are intentionally NOT matched:
+		// they have ambiguous resolution that requires filesystem/dispatcher context.
+		{
+			name:     "shorthand target does not match polecat (ambiguous resolution)",
+			target:   "gastown/toast",
+			assignee: "gastown/polecats/toast",
+			want:     false,
+		},
+		{
+			name:     "shorthand target does not match crew (ambiguous resolution)",
+			target:   "gastown/alex",
+			assignee: "gastown/crew/alex",
+			want:     false,
+		},
+		{
+			name:     "dog pool target does not match specific dog (pool dispatch)",
+			target:   "deacon/dogs",
+			assignee: "deacon/dogs/alpha",
+			want:     false,
+		},
+		{
+			name:     "exact dog path still matches",
+			target:   "deacon/dogs/alpha",
+			assignee: "deacon/dogs/alpha",
+			want:     true,
 		},
 	}
 
