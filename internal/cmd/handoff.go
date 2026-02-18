@@ -112,6 +112,10 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 		if parsedRole == RolePolecat {
 			isPolecat = true
 			polecatName = name
+			// Bare "polecat" role yields empty name; fall back to GT_POLECAT.
+			if polecatName == "" {
+				polecatName = os.Getenv("GT_POLECAT")
+			}
 		}
 	} else if name := os.Getenv("GT_POLECAT"); name != "" {
 		isPolecat = true

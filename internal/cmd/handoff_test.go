@@ -300,6 +300,10 @@ func TestHandoffPolecatEnvCheck(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("GT_ROLE", tt.role)
 			t.Setenv("GT_POLECAT", tt.polecat)
+			// Ensure deterministic non-tmux execution so the non-polecat
+			// paths fail predictably instead of triggering real side effects.
+			t.Setenv("TMUX", "")
+			t.Setenv("TMUX_PANE", "")
 
 			// Reset flags to avoid interference
 			origMessage := handoffMessage
