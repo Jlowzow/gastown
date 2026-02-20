@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +9,6 @@ import (
 
 func TestTownBeadsConfigCheck_NoTownBeadsDir(t *testing.T) {
 	check := NewTownBeadsConfigCheck()
-	check.lookupPath = func(file string) (string, error) { return "/tmp/bd", nil }
 
 	result := check.Run(&CheckContext{TownRoot: t.TempDir()})
 	if result.Status != StatusOK {
@@ -18,21 +16,16 @@ func TestTownBeadsConfigCheck_NoTownBeadsDir(t *testing.T) {
 	}
 }
 
-func TestTownBeadsConfigCheck_SkipsWhenBeadsDisabled(t *testing.T) {
+func TestTownBeadsConfigCheck_DetectsMissingConfig(t *testing.T) {
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
 		t.Fatalf("mkdir .beads: %v", err)
 	}
 
 	check := NewTownBeadsConfigCheck()
-	check.lookupPath = func(file string) (string, error) { return "", errors.New("not found") }
-
 	result := check.Run(&CheckContext{TownRoot: townRoot})
-	if result.Status != StatusOK {
-		t.Fatalf("Status = %v, want %v", result.Status, StatusOK)
-	}
-	if !strings.Contains(result.Message, "skipped") {
-		t.Fatalf("Message = %q, want skipped", result.Message)
+	if result.Status != StatusError {
+		t.Fatalf("Status = %v, want %v", result.Status, StatusError)
 	}
 }
 
@@ -48,7 +41,6 @@ func TestTownBeadsConfigCheck_FixCreatesConfigFromMetadata(t *testing.T) {
 	}
 
 	check := NewTownBeadsConfigCheck()
-	check.lookupPath = func(file string) (string, error) { return "/tmp/bd", nil }
 	ctx := &CheckContext{TownRoot: townRoot}
 
 	result := check.Run(ctx)
@@ -94,7 +86,6 @@ func TestTownBeadsConfigCheck_FixDoesNotOverwriteExistingConfig(t *testing.T) {
 	}
 
 	check := NewTownBeadsConfigCheck()
-	check.lookupPath = func(file string) (string, error) { return "/tmp/bd", nil }
 	ctx := &CheckContext{TownRoot: townRoot}
 
 	result := check.Run(ctx)

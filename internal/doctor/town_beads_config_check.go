@@ -3,7 +3,6 @@ package doctor
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -14,7 +13,6 @@ import (
 type TownBeadsConfigCheck struct {
 	FixableCheck
 	missingConfig bool
-	lookupPath    func(file string) (string, error)
 }
 
 // NewTownBeadsConfigCheck creates a town-level beads config check.
@@ -27,11 +25,10 @@ func NewTownBeadsConfigCheck() *TownBeadsConfigCheck {
 				CheckCategory:    CategoryConfig,
 			},
 		},
-		lookupPath: exec.LookPath,
 	}
 }
 
-// Run checks if town-level config.yaml exists when town .beads exists and bd is available.
+// Run checks if town-level config.yaml exists when town .beads exists.
 func (c *TownBeadsConfigCheck) Run(ctx *CheckContext) *CheckResult {
 	c.missingConfig = false
 
@@ -48,16 +45,6 @@ func (c *TownBeadsConfigCheck) Run(ctx *CheckContext) *CheckResult {
 			Name:     c.Name(),
 			Status:   StatusWarning,
 			Message:  fmt.Sprintf("Could not access town .beads directory: %v", err),
-			Category: c.CheckCategory,
-		}
-	}
-
-	// Gate the check behind beads availability.
-	if _, err := c.lookupPath("bd"); err != nil {
-		return &CheckResult{
-			Name:     c.Name(),
-			Status:   StatusOK,
-			Message:  "beads not installed (skipped)",
 			Category: c.CheckCategory,
 		}
 	}

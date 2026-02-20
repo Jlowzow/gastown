@@ -512,8 +512,10 @@ func writeJSON(path string, data interface{}) error {
 func initTownBeads(townPath string) error {
 	// Run: bd init --prefix hq --server
 	// Dolt is the only backend since bd v0.51.0; no --backend flag needed.
+	// Filter inherited BEADS_DIR so bd init targets this town, not a parent .beads.
 	cmd := exec.Command("bd", "init", "--prefix", "hq", "--server")
 	cmd.Dir = townPath
+	cmd.Env = withBeadsDirEnv(filepath.Join(townPath, ".beads"))
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -531,8 +533,8 @@ func initTownBeads(townPath string) error {
 		return fmt.Errorf("bd init succeeded but .beads directory not created (check bd daemon interference)")
 	}
 
-	// bd init may write metadata that points to beads_hq; normalize to hq so
-	// town-level commands always target the canonical HQ database.
+	// Ensure metadata.json has dolt_database set (EnsureMetadata fills missing
+	// values but does not overwrite existing ones).
 	if err := doltserver.EnsureMetadata(townPath, "hq"); err != nil {
 		return fmt.Errorf("ensuring hq metadata: %w", err)
 	}
