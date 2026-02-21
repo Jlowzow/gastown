@@ -144,13 +144,20 @@ func (a *Amux) HasSession(name string) (bool, error) {
 	return true, nil
 }
 
-// amuxSession represents a session in amux ls --json output.
-type amuxSession struct {
-	Name string `json:"name"`
+// SessionInfo represents the full session detail from amux ls/info --json.
+type SessionInfo struct {
+	Name         string  `json:"name"`
+	Command      string  `json:"command"`
+	PID          int     `json:"pid"`
+	Alive        bool    `json:"alive"`
+	CreatedAt    string  `json:"created_at"`
+	UptimeSecs   float64 `json:"uptime_secs"`
+	LastActivity string  `json:"last_activity"`
+	IdleSecs     float64 `json:"idle_secs"`
 }
 
-// ListSessions returns all session names.
-func (a *Amux) ListSessions() ([]string, error) {
+// ListSessionInfo returns full session info for all sessions.
+func (a *Amux) ListSessionInfo() ([]SessionInfo, error) {
 	out, err := a.run("ls", "--json")
 	if err != nil {
 		if errors.Is(err, ErrNoDaemon) {
@@ -163,16 +170,38 @@ func (a *Amux) ListSessions() ([]string, error) {
 		return nil, nil
 	}
 
-	var sessions []amuxSession
+	var sessions []SessionInfo
 	if err := json.Unmarshal([]byte(out), &sessions); err != nil {
 		return nil, fmt.Errorf("amux ls: parsing JSON: %w", err)
 	}
+	return sessions, nil
+}
 
+// ListSessions returns all session names.
+func (a *Amux) ListSessions() ([]string, error) {
+	sessions, err := a.ListSessionInfo()
+	if err != nil {
+		return nil, err
+	}
 	names := make([]string, len(sessions))
 	for i, s := range sessions {
 		names[i] = s.Name
 	}
 	return names, nil
+}
+
+// GetSessionInfo returns detailed info for a single session.
+func (a *Amux) GetSessionInfo(name string) (*SessionInfo, error) {
+	out, err := a.run("info", "-t", name, "--json")
+	if err != nil {
+		return nil, err
+	}
+
+	var info SessionInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("amux info: parsing JSON: %w", err)
+	}
+	return &info, nil
 }
 
 // GetSessionSet returns a SessionSet containing all current sessions.
@@ -218,20 +247,23 @@ func (a *Amux) GetEnvironment(session, key string) (string, error) {
 }
 
 // IsAgentRunning checks if an agent appears to be running in the session.
-// Uses amux ls --json to check if the session exists and has a running process.
+// Uses amux info to check session existence, process liveness, and optionally
+// whether the command matches expectedPaneCommands.
 func (a *Amux) IsAgentRunning(session string, expectedPaneCommands ...string) bool {
-	out, err := a.run("ls", "--json")
+	info, err := a.GetSessionInfo(session)
 	if err != nil {
 		return false
 	}
-
-	var sessions []amuxSession
-	if err := json.Unmarshal([]byte(out), &sessions); err != nil {
+	if !info.Alive {
 		return false
 	}
-
-	for _, s := range sessions {
-		if s.Name == session {
+	// If no expected commands specified, alive is sufficient.
+	if len(expectedPaneCommands) == 0 {
+		return true
+	}
+	// Check if the session's command contains any of the expected commands.
+	for _, cmd := range expectedPaneCommands {
+		if strings.Contains(info.Command, cmd) {
 			return true
 		}
 	}
@@ -248,6 +280,48 @@ func (a *Amux) IsAgentAlive(session string) bool {
 func (a *Amux) IsAvailable() bool {
 	_, err := a.run("ls")
 	return err == nil
+}
+
+// CheckSessionHealth determines the health status of an amux session.
+// Uses amux info --json to check process liveness and idle time.
+func (a *Amux) CheckSessionHealth(session string, maxInactivity time.Duration) tmux.ZombieStatus {
+	info, err := a.GetSessionInfo(session)
+	if err != nil {
+		return tmux.SessionDead
+	}
+	if !info.Alive {
+		return tmux.AgentDead
+	}
+	if maxInactivity > 0 && time.Duration(info.IdleSecs*float64(time.Second)) > maxInactivity {
+		return tmux.AgentHung
+	}
+	return tmux.SessionHealthy
+}
+
+// SendKeysRaw sends literal text to a session (amux send -l).
+// In amux, SendKeys already uses -l (literal mode), so this is equivalent.
+func (a *Amux) SendKeysRaw(session, keys string) error {
+	return a.SendKeys(session, keys)
+}
+
+// AttachSession attaches to an existing amux session.
+func (a *Amux) AttachSession(session string) error {
+	cmd := exec.Command("amux", "attach", "-t", session)
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	return cmd.Run()
+}
+
+// WaitForExit blocks until the session exits or timeout is reached.
+// Returns nil if the session exited, or an error on timeout.
+func (a *Amux) WaitForExit(session string, timeout time.Duration) error {
+	args := []string{"wait", "-t", session}
+	if timeout > 0 {
+		args = append(args, "--timeout", fmt.Sprintf("%d", int(timeout.Seconds())))
+	}
+	_, err := a.run(args...)
+	return err
 }
 
 // getSessionNudgeSem returns the channel semaphore for serializing nudges.

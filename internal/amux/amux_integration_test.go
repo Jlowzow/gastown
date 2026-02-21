@@ -370,6 +370,179 @@ func TestIntegration_HasSession_Nonexistent(t *testing.T) {
 	}
 }
 
+// TestIntegration_GTPolecat_EndToEnd simulates a complete GT polecat session
+// lifecycle on the amux backend. This validates the full SessionBackend interface
+// works end-to-end before switching GT over from tmux.
+//
+// The test follows the exact sequence GT uses when managing a polecat:
+// 1. Create session with GT env vars (GT_ROLE, GT_RIG, GT_AGENT)
+// 2. Verify session appears in listings
+// 3. Set runtime metadata via SetEnvironment (hook_bead, session_id)
+// 4. Read metadata back via GetEnvironment
+// 5. Send a command via SendKeys (simulating a nudge)
+// 6. Capture output and verify
+// 7. Kill session and verify complete cleanup
+func TestIntegration_GTPolecat_EndToEnd(t *testing.T) {
+	cleanup := ensureDaemon(t)
+	defer cleanup()
+
+	a := NewAmux()
+	session := uniqueSession(t, "gt-e2e")
+	workDir := t.TempDir()
+
+	// === Phase 1: Create session with GT env vars ===
+	// This is how GT spawns a polecat: with role, rig, and agent identity.
+	gtEnv := map[string]string{
+		"GT_ROLE":  "gastown/polecats/furiosa",
+		"GT_RIG":   "gastown",
+		"GT_AGENT": "furiosa",
+	}
+
+	// Use a shell that stays alive (simulating a polecat running claude)
+	err := a.NewSessionWithCommandAndEnv(session, workDir, "/bin/sh", gtEnv)
+	if err != nil {
+		t.Fatalf("Phase 1: NewSessionWithCommandAndEnv(%q) failed: %v", session, err)
+	}
+	defer a.KillSession(session)
+
+	// === Phase 2: Verify session appears in listings ===
+	// GT checks HasSession and ListSessions to verify spawns succeeded.
+	exists, err := a.HasSession(session)
+	if err != nil {
+		t.Fatalf("Phase 2: HasSession(%q) failed: %v", session, err)
+	}
+	if !exists {
+		t.Fatalf("Phase 2: HasSession(%q) = false, want true", session)
+	}
+
+	sessions, err := a.ListSessions()
+	if err != nil {
+		t.Fatalf("Phase 2: ListSessions() failed: %v", err)
+	}
+	found := false
+	for _, s := range sessions {
+		if s == session {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("Phase 2: session %q not found in ListSessions() = %v", session, sessions)
+	}
+
+	set, err := a.GetSessionSet()
+	if err != nil {
+		t.Fatalf("Phase 2: GetSessionSet() failed: %v", err)
+	}
+	if !set.Has(session) {
+		t.Fatalf("Phase 2: GetSessionSet().Has(%q) = false", session)
+	}
+
+	if !a.IsAgentAlive(session) {
+		t.Fatalf("Phase 2: IsAgentAlive(%q) = false", session)
+	}
+	if !a.IsAgentRunning(session) {
+		t.Fatalf("Phase 2: IsAgentRunning(%q) = false", session)
+	}
+
+	// === Phase 3: Set runtime metadata via SetEnvironment ===
+	// GT uses session env to store runtime state like hook_bead and session_id.
+	metadata := map[string]string{
+		"GT_HOOK_BEAD":  "gt-asi",
+		"GT_SESSION_ID": "e2e-test-session-001",
+		"GT_MOLECULE":   "gt-wisp-ull",
+	}
+	for k, v := range metadata {
+		if err := a.SetEnvironment(session, k, v); err != nil {
+			t.Fatalf("Phase 3: SetEnvironment(%q, %s, %s) failed: %v", session, k, v, err)
+		}
+	}
+
+	// === Phase 4: Read metadata back via GetEnvironment ===
+	for k, want := range metadata {
+		got, err := a.GetEnvironment(session, k)
+		if err != nil {
+			t.Fatalf("Phase 4: GetEnvironment(%q, %s) failed: %v", session, k, err)
+		}
+		if got != want {
+			t.Errorf("Phase 4: GetEnvironment(%q, %s) = %q, want %q", session, k, got, want)
+		}
+	}
+
+	// === Phase 5: Send a command via SendKeys ===
+	// GT nudges polecats by sending text to their session.
+	time.Sleep(300 * time.Millisecond) // let shell initialize
+
+	marker := "GT_E2E_POLECAT_MARKER"
+	err = a.SendKeys(session, fmt.Sprintf("echo %s\n", marker))
+	if err != nil {
+		t.Fatalf("Phase 5: SendKeys(%q) failed: %v", session, err)
+	}
+
+	// === Phase 6: Capture output and verify ===
+	time.Sleep(500 * time.Millisecond) // let command execute
+
+	output, err := a.CapturePane(session, 50)
+	if err != nil {
+		t.Fatalf("Phase 6: CapturePane(%q) failed: %v", session, err)
+	}
+	if !strings.Contains(output, marker) {
+		t.Errorf("Phase 6: CapturePane output missing marker %q.\nGot: %s", marker, output)
+	}
+
+	// Also test NudgeSession (which GT uses for serialized message delivery)
+	nudgeMarker := "GT_E2E_NUDGE_MARKER"
+	err = a.NudgeSession(session, fmt.Sprintf("echo %s\n", nudgeMarker))
+	if err != nil {
+		t.Fatalf("Phase 6: NudgeSession(%q) failed: %v", session, err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	output, err = a.CapturePane(session, 50)
+	if err != nil {
+		t.Fatalf("Phase 6: CapturePane after nudge failed: %v", err)
+	}
+	if !strings.Contains(output, nudgeMarker) {
+		t.Errorf("Phase 6: CapturePane output missing nudge marker %q.\nGot: %s", nudgeMarker, output)
+	}
+
+	// === Phase 7: Kill session and verify complete cleanup ===
+	err = a.KillSession(session)
+	if err != nil {
+		t.Fatalf("Phase 7: KillSession(%q) failed: %v", session, err)
+	}
+
+	// Verify HasSession returns false
+	exists, err = a.HasSession(session)
+	if err != nil {
+		t.Fatalf("Phase 7: HasSession after kill failed: %v", err)
+	}
+	if exists {
+		t.Fatalf("Phase 7: HasSession(%q) = true after kill", session)
+	}
+
+	// Verify IsAgentAlive returns false
+	if a.IsAgentAlive(session) {
+		t.Fatalf("Phase 7: IsAgentAlive(%q) = true after kill", session)
+	}
+
+	// Verify IsAgentRunning returns false
+	if a.IsAgentRunning(session) {
+		t.Fatalf("Phase 7: IsAgentRunning(%q) = true after kill", session)
+	}
+
+	// Verify session no longer appears in listings
+	sessions, err = a.ListSessions()
+	if err != nil {
+		t.Fatalf("Phase 7: ListSessions after kill failed: %v", err)
+	}
+	for _, s := range sessions {
+		if s == session {
+			t.Fatalf("Phase 7: session %q still in ListSessions after kill", session)
+		}
+	}
+}
+
 func TestIntegration_CapturePane_Nonexistent(t *testing.T) {
 	cleanup := ensureDaemon(t)
 	defer cleanup()
