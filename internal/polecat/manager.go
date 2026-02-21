@@ -122,7 +122,8 @@ type Manager struct {
 	git      *git.Git
 	beads    *beads.Beads
 	namePool *NamePool
-	tmux     *tmux.Tmux
+	tmux     *tmux.Tmux              // Deprecated: use backend field
+	backend  session.SessionBackend  // Preferred: supports tmux or amux
 }
 
 // NewManager creates a new polecat manager.
@@ -159,7 +160,49 @@ func NewManager(r *rig.Rig, g *git.Git, t *tmux.Tmux) *Manager {
 		beads:    beads.NewWithBeadsDir(beadsPath, resolvedBeads),
 		namePool: pool,
 		tmux:     t,
+		backend:  t, // tmux implements SessionBackend
 	}
+}
+
+// NewManagerWithBackend creates a polecat manager using the given SessionBackend.
+// Preferred over NewManager for code that supports multiple backends.
+func NewManagerWithBackend(r *rig.Rig, g *git.Git, b session.SessionBackend) *Manager {
+	resolvedBeads := beads.ResolveBeadsDir(r.Path)
+	beadsPath := filepath.Dir(resolvedBeads)
+
+	settingsPath := filepath.Join(r.Path, "settings", "config.json")
+	var pool *NamePool
+
+	settings, err := config.LoadRigSettings(settingsPath)
+	if err == nil && settings.Namepool != nil {
+		pool = NewNamePoolWithConfig(
+			r.Path,
+			r.Name,
+			settings.Namepool.Style,
+			settings.Namepool.Names,
+			settings.Namepool.MaxBeforeNumbering,
+		)
+	} else {
+		pool = NewNamePool(r.Path, r.Name)
+	}
+	_ = pool.Load()
+
+	return &Manager{
+		rig:      r,
+		git:      g,
+		beads:    beads.NewWithBeadsDir(beadsPath, resolvedBeads),
+		namePool: pool,
+		backend:  b,
+	}
+}
+
+// sessionBackend returns the configured session backend, preferring the new
+// backend field over the deprecated tmux field.
+func (m *Manager) sessionBackend() session.SessionBackend {
+	if m.backend != nil {
+		return m.backend
+	}
+	return m.tmux
 }
 
 // lockPolecat acquires an exclusive file lock for a specific polecat.
@@ -1072,10 +1115,10 @@ func (m *Manager) AllocateName() (string, error) {
 	// can be allocated after its directory was cleaned up while the tmux session
 	// lingers (race between cleanup and allocation). This extra check ensures
 	// no stale session blocks the new polecat's session creation.
-	if m.tmux != nil {
+	if b := m.sessionBackend(); b != nil {
 		sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
-		if alive, _ := m.tmux.HasSession(sessionName); alive {
-			_ = m.tmux.KillSessionWithProcesses(sessionName)
+		if alive, _ := b.HasSession(sessionName); alive {
+			_ = b.KillSessionWithProcesses(sessionName)
 		}
 	}
 
@@ -1310,13 +1353,13 @@ func (m *Manager) reconcilePoolInternal() {
 		}
 	}
 
-	// Get names with tmux sessions
+	// Get names with active sessions
 	var namesWithSessions []string
-	if m.tmux != nil {
+	if b := m.sessionBackend(); b != nil {
 		poolNames := m.namePool.getNames()
 		for _, name := range poolNames {
 			sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
-			hasSession, _ := m.tmux.HasSession(sessionName)
+			hasSession, _ := b.HasSession(sessionName)
 			if hasSession {
 				namesWithSessions = append(namesWithSessions, name)
 			}
@@ -1346,18 +1389,21 @@ func (m *Manager) ReconcilePoolWith(namesWithDirs, namesWithSessions []string) {
 	}
 
 	// Kill orphaned or stale sessions.
-	// - No directory: orphan session, always kill (worktree was removed but tmux lingered)
+	// - No directory: orphan session, always kill (worktree was removed but session lingered)
 	// - Has directory but dead process: stale session from crashed startup (gt-jn40ft)
 	// Use KillSessionWithProcesses to ensure all descendant processes are killed.
-	if m.tmux != nil {
+	if b := m.sessionBackend(); b != nil {
 		for _, name := range namesWithSessions {
 			sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
 			if !dirSet[name] {
 				// Orphan: session exists but no directory
-				_ = m.tmux.KillSessionWithProcesses(sessionName)
-			} else if isSessionProcessDead(m.tmux, sessionName) {
-				// Stale: directory exists but session's process has died
-				_ = m.tmux.KillSessionWithProcesses(sessionName)
+				_ = b.KillSessionWithProcesses(sessionName)
+			} else if tmuxT, ok := b.(*tmux.Tmux); ok && isSessionProcessDead(tmuxT, sessionName) {
+				// Stale: directory exists but session's process has died (tmux-specific check)
+				_ = b.KillSessionWithProcesses(sessionName)
+			} else if !b.IsAgentAlive(sessionName) {
+				// Stale: directory exists but agent is not running
+				_ = b.KillSessionWithProcesses(sessionName)
 			}
 		}
 	}
@@ -1686,9 +1732,9 @@ func (m *Manager) loadFromBeads(name string) (*Polecat, error) {
 	if issue != nil {
 		issueID = issue.ID
 		state = StateWorking
-	} else if m.tmux != nil {
+	} else if b := m.sessionBackend(); b != nil {
 		sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
-		if running, _ := m.tmux.HasSession(sessionName); running {
+		if running, _ := b.HasSession(sessionName); running {
 			state = StateWorking
 		}
 	}
