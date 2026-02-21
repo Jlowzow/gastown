@@ -17,7 +17,6 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/suggest"
-	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/townlog"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -235,8 +234,8 @@ func getSessionManager(rigName string) (*polecat.SessionManager, *rig.Rig, error
 		return nil, nil, err
 	}
 
-	t := tmux.NewTmux()
-	polecatMgr := polecat.NewSessionManager(t, r)
+	backend := session.NewBackend()
+	polecatMgr := polecat.NewSessionManagerWithBackend(backend, r)
 
 	return polecatMgr, r, nil
 }
@@ -382,11 +381,11 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Collect sessions from all rigs
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 	var allSessions []SessionListItem
 
 	for _, r := range rigs {
-		polecatMgr := polecat.NewSessionManager(t, r)
+		polecatMgr := polecat.NewSessionManagerWithBackend(backend, r)
 		infos, err := polecatMgr.List()
 		if err != nil {
 			continue
@@ -653,7 +652,7 @@ func runSessionCheck(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%s Session Health Check\n\n", style.Bold.Render("🔍"))
 
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 	totalChecked := 0
 	totalHealthy := 0
 	totalCrashed := 0
@@ -677,7 +676,7 @@ func runSessionCheck(cmd *cobra.Command, args []string) error {
 			totalChecked++
 
 			// Check if session exists
-			running, err := t.HasSession(sessionName)
+			running, err := backend.HasSession(sessionName)
 			if err != nil {
 				fmt.Printf("  %s %s/%s: %s\n", style.Bold.Render("⚠"), r.Name, polecatName, style.Dim.Render("error checking session"))
 				continue

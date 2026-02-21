@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -261,8 +262,8 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 	}
 
 	// Start session
-	t := tmux.NewTmux()
-	polecatSessMgr := polecat.NewSessionManager(t, r)
+	backend := session.NewBackend()
+	polecatSessMgr := polecat.NewSessionManagerWithBackend(backend, r)
 
 	fmt.Printf("Starting session for %s/%s...\n", s.RigName, s.PolecatName)
 	startOpts := polecat.SessionStartOptions{
@@ -284,8 +285,13 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 	// Wait for runtime to be fully ready before returning.
 	spawnTownRoot := filepath.Dir(r.Path)
 	runtimeConfig := config.ResolveRoleAgentConfig("polecat", spawnTownRoot, r.Path)
-	if err := t.WaitForRuntimeReady(s.SessionName, runtimeConfig, 30*time.Second); err != nil {
-		style.PrintWarning("runtime may not be fully ready: %v", err)
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		if err := tmuxBackend.WaitForRuntimeReady(s.SessionName, runtimeConfig, 30*time.Second); err != nil {
+			style.PrintWarning("runtime may not be fully ready: %v", err)
+		}
+	} else {
+		// Non-tmux backends: wait a fixed period for runtime readiness
+		time.Sleep(2 * time.Second)
 	}
 
 	// Update agent state with retry logic (gt-94llt7: fail-safe Dolt writes).
@@ -295,7 +301,7 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 	// monitoring visibility, not correctness. Compare with createAgentBeadWithRetry
 	// which fails hard because a polecat without an agent bead is untrackable.
 	polecatGit := git.NewGit(r.Path)
-	polecatMgr := polecat.NewManager(r, polecatGit, t)
+	polecatMgr := polecat.NewManager(r, polecatGit, tmux.NewTmux())
 	if err := polecatMgr.SetAgentStateWithRetry(s.PolecatName, "working"); err != nil {
 		style.PrintWarning("could not update agent state after retries: %v", err)
 	}
@@ -308,10 +314,19 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 
 	// Get pane — if this fails, the session may have died during startup.
 	// Kill the dead session to prevent "session already running" on next attempt (gt-jn40ft).
+	if session.BackendName() == "amux" {
+		// Amux has no pane concept — verify session exists and use session name as target.
+		if alive, _ := backend.HasSession(s.SessionName); !alive {
+			return "", fmt.Errorf("amux session %s not found after startup (session likely died)", s.SessionName)
+		}
+		s.Pane = s.SessionName
+		return s.SessionName, nil
+	}
+
 	pane, err := getSessionPane(s.SessionName)
 	if err != nil {
-		// Session likely died — clean up the tmux session so it doesn't block re-sling
-		_ = t.KillSession(s.SessionName)
+		// Session likely died — clean up so it doesn't block re-sling
+		_ = backend.KillSession(s.SessionName)
 		return "", fmt.Errorf("getting pane for %s (session likely died during startup): %w", s.SessionName, err)
 	}
 
