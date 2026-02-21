@@ -51,18 +51,23 @@ func (m *Manager) SetOutput(w io.Writer) {
 	m.output = w
 }
 
-// SessionName returns the tmux session name for this refinery.
+// SessionName returns the session name for this refinery.
 func (m *Manager) SessionName() string {
 	return session.RefinerySessionName(session.PrefixFor(m.rig.Name))
 }
 
+// backend returns the configured session backend (tmux or amux).
+func (m *Manager) backend() session.SessionBackend {
+	return session.NewBackend()
+}
+
 // IsRunning checks if the refinery session is active and healthy.
-// Checks both tmux session existence AND agent process liveness to avoid
-// reporting zombie sessions (tmux alive but Claude dead) as "running".
-// ZFC: tmux session existence is the source of truth for session state,
+// Checks both session existence AND agent process liveness to avoid
+// reporting zombie sessions (session alive but Claude dead) as "running".
+// ZFC: session existence is the source of truth for session state,
 // but agent liveness determines if the session is actually functional.
 func (m *Manager) IsRunning() (bool, error) {
-	t := tmux.NewTmux()
+	t := m.backend()
 	sessionName := m.SessionName()
 	status := t.CheckSessionHealth(sessionName, 0)
 	return status == tmux.SessionHealthy, nil
@@ -74,14 +79,14 @@ func (m *Manager) IsRunning() (bool, error) {
 // Returns the detailed ZombieStatus for callers that need to distinguish
 // between different failure modes.
 func (m *Manager) IsHealthy(maxInactivity time.Duration) tmux.ZombieStatus {
-	t := tmux.NewTmux()
+	t := m.backend()
 	return t.CheckSessionHealth(m.SessionName(), maxInactivity)
 }
 
 // Status returns information about the refinery session.
-// ZFC-compliant: tmux session is the source of truth.
+// ZFC-compliant: session existence is the source of truth.
 func (m *Manager) Status() (*tmux.SessionInfo, error) {
-	t := tmux.NewTmux()
+	t := m.backend()
 	sessionID := m.SessionName()
 
 	running, err := t.HasSession(sessionID)
@@ -92,7 +97,11 @@ func (m *Manager) Status() (*tmux.SessionInfo, error) {
 		return nil, ErrNotRunning
 	}
 
-	return t.GetSessionInfo(sessionID)
+	// GetSessionInfo is tmux-specific; for other backends, return basic info.
+	if tmuxT, ok := t.(*tmux.Tmux); ok {
+		return tmuxT.GetSessionInfo(sessionID)
+	}
+	return &tmux.SessionInfo{Name: sessionID}, nil
 }
 
 // Start starts the refinery.
@@ -101,7 +110,7 @@ func (m *Manager) Status() (*tmux.SessionInfo, error) {
 // The agentOverride parameter allows specifying an agent alias to use instead of the town default.
 // ZFC-compliant: no state file, tmux session is source of truth.
 func (m *Manager) Start(foreground bool, agentOverride string) error {
-	t := tmux.NewTmux()
+	t := m.backend()
 	sessionID := m.SessionName()
 
 	if foreground {
@@ -116,16 +125,16 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 		if t.IsAgentAlive(sessionID) {
 			return ErrAlreadyRunning
 		}
-		// Zombie - tmux alive but agent dead. Kill and recreate.
-		_, _ = fmt.Fprintln(m.output, "⚠ Detected zombie session (tmux alive, agent dead). Recreating...")
+		// Zombie - session alive but agent dead. Kill and recreate.
+		_, _ = fmt.Fprintln(m.output, "⚠ Detected zombie session (session alive, agent dead). Recreating...")
 		if err := t.KillSession(sessionID); err != nil {
 			return fmt.Errorf("killing zombie session: %w", err)
 		}
 	}
 
-	// Note: No PID check per ZFC - tmux session is the source of truth
+	// Note: No PID check per ZFC - session existence is the source of truth
 
-	// Background mode: spawn a Claude agent in a tmux session
+	// Background mode: spawn a Claude agent in a session
 	// The Claude agent handles MR processing using git commands and beads
 
 	// Working directory is the refinery worktree (shares .git with mayor/polecats)
@@ -171,7 +180,7 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 	// Create session with command directly to avoid send-keys race condition.
 	// See: https://github.com/anthropics/gastown/issues/280
 	if err := t.NewSessionWithCommand(sessionID, refineryRigDir, command); err != nil {
-		return fmt.Errorf("creating tmux session: %w", err)
+		return fmt.Errorf("creating session: %w", err)
 	}
 
 	// Set environment variables (non-fatal: session works without these)
@@ -186,45 +195,51 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 	// Add refinery-specific flag
 	envVars["GT_REFINERY"] = "1"
 
-	// Set all env vars in tmux session (for debugging) and they'll also be exported to Claude
+	// Set all env vars in session (for debugging) and they'll also be exported to Claude
 	for k, v := range envVars {
 		_ = t.SetEnvironment(sessionID, k, v)
 	}
 
-	// Apply theme (non-fatal: theming failure doesn't affect operation)
-	theme := tmux.AssignTheme(m.rig.Name)
-	_ = t.ConfigureGasTownSession(sessionID, theme, m.rig.Name, "refinery", "refinery")
+	// Apply tmux-specific features (theming, bypass dialog, wait for ready)
+	if extras, ok := t.(session.TmuxExtras); ok {
+		theme := tmux.AssignTheme(m.rig.Name)
+		_ = extras.ConfigureGasTownSession(sessionID, theme, m.rig.Name, "refinery", "refinery")
 
-	// Accept bypass permissions warning dialog if it appears.
-	// Must be before WaitForRuntimeReady to avoid race where dialog blocks prompt detection.
-	_ = t.AcceptBypassPermissionsWarning(sessionID)
-
-	// Wait for Claude to start and show its prompt - fatal if Claude fails to launch
-	// WaitForRuntimeReady waits for the runtime to be ready
-	if err := t.WaitForRuntimeReady(sessionID, runtimeConfig, constants.ClaudeStartTimeout); err != nil {
-		// Kill the zombie session before returning error
-		_ = t.KillSessionWithProcesses(sessionID)
-		return fmt.Errorf("waiting for refinery to start: %w", err)
+		// Accept bypass permissions warning dialog if it appears.
+		// Must be before WaitForRuntimeReady to avoid race where dialog blocks prompt detection.
+		_ = extras.AcceptBypassPermissionsWarning(sessionID)
 	}
 
-	_ = runtime.RunStartupFallback(t, sessionID, "refinery", runtimeConfig)
+	// Wait for Claude to start - backend-specific
+	if tmuxT, ok := t.(*tmux.Tmux); ok {
+		// tmux: WaitForRuntimeReady uses tmux-specific prompt detection
+		if err := tmuxT.WaitForRuntimeReady(sessionID, runtimeConfig, constants.ClaudeStartTimeout); err != nil {
+			_ = t.KillSessionWithProcesses(sessionID)
+			return fmt.Errorf("waiting for refinery to start: %w", err)
+		}
+	} else {
+		// Non-tmux backend: basic wait for session to be ready
+		time.Sleep(2 * time.Second)
+	}
+
+	if tmuxT, ok := t.(*tmux.Tmux); ok {
+		_ = runtime.RunStartupFallback(tmuxT, sessionID, "refinery", runtimeConfig)
+	}
 
 	return nil
 }
 
 // Stop stops the refinery.
-// ZFC-compliant: tmux session is the source of truth.
+// ZFC-compliant: session existence is the source of truth.
 func (m *Manager) Stop() error {
-	t := tmux.NewTmux()
+	t := m.backend()
 	sessionID := m.SessionName()
 
-	// Check if tmux session exists
 	running, _ := t.HasSession(sessionID)
 	if !running {
 		return ErrNotRunning
 	}
 
-	// Kill the tmux session
 	return t.KillSession(sessionID)
 }
 

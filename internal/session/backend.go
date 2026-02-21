@@ -24,6 +24,7 @@ type SessionBackend interface {
 
 	// Input
 	SendKeys(session, keys string) error
+	SendKeysRaw(session, keys string) error
 	NudgeSession(session, message string) error
 
 	// Output capture
@@ -33,7 +34,11 @@ type SessionBackend interface {
 	SetEnvironment(session, key, value string) error
 	GetEnvironment(session, key string) (string, error)
 
+	// Session interaction
+	AttachSession(session string) error
+
 	// Health
+	CheckSessionHealth(session string, maxInactivity time.Duration) tmux.ZombieStatus
 	IsAgentRunning(session string, expectedPaneCommands ...string) bool
 	IsAgentAlive(session string) bool
 	IsAvailable() bool
@@ -47,6 +52,14 @@ type TmuxExtras interface {
 	WaitForCommand(session string, cmds []string, timeout time.Duration) error
 	SetAutoRespawnHook(session string) error
 	AcceptBypassPermissionsWarning(session string) error
+	SetPaneDiedHook(session, agentID string) error
+	SendKeysDebounced(session, keys string, debounceMs int) error
+}
+
+// AmuxExtras is an optional interface for amux-specific features.
+// Use type assertions to check availability.
+type AmuxExtras interface {
+	WaitForExit(session string, timeout time.Duration) error
 }
 
 // BackendName returns "amux" or "tmux" based on the GT_SESSION_BACKEND env var.

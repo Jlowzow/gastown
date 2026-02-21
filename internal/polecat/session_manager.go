@@ -40,15 +40,25 @@ var (
 
 // SessionManager handles polecat session lifecycle.
 type SessionManager struct {
-	tmux *tmux.Tmux
-	rig  *rig.Rig
+	backend session.SessionBackend
+	rig     *rig.Rig
 }
 
 // NewSessionManager creates a new polecat session manager for a rig.
+// Accepts *tmux.Tmux for backward compatibility; use NewSessionManagerWithBackend
+// for explicit backend selection.
 func NewSessionManager(t *tmux.Tmux, r *rig.Rig) *SessionManager {
 	return &SessionManager{
-		tmux: t,
-		rig:  r,
+		backend: t,
+		rig:     r,
+	}
+}
+
+// NewSessionManagerWithBackend creates a polecat session manager with an explicit backend.
+func NewSessionManagerWithBackend(b session.SessionBackend, r *rig.Rig) *SessionManager {
+	return &SessionManager{
+		backend: b,
+		rig:     r,
 	}
 }
 
@@ -197,13 +207,13 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// Check if session already exists.
 	// If an existing session's pane process has died, kill the stale session
 	// and proceed rather than returning ErrSessionRunning (gt-jn40ft).
-	running, err := m.tmux.HasSession(sessionID)
+	running, err := m.backend.HasSession(sessionID)
 	if err != nil {
 		return fmt.Errorf("checking session: %w", err)
 	}
 	if running {
 		if m.isSessionStale(sessionID) {
-			if err := m.tmux.KillSessionWithProcesses(sessionID); err != nil {
+			if err := m.backend.KillSessionWithProcesses(sessionID); err != nil {
 				return fmt.Errorf("killing stale session %s: %w", sessionID, err)
 			}
 		} else {
@@ -313,7 +323,7 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 
 	// Create session with command directly to avoid send-keys race condition.
 	// See: https://github.com/anthropics/gastown/issues/280
-	if err := m.tmux.NewSessionWithCommand(sessionID, workDir, command); err != nil {
+	if err := m.backend.NewSessionWithCommand(sessionID, workDir, command); err != nil {
 		return fmt.Errorf("creating session: %w", err)
 	}
 
@@ -329,7 +339,7 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		Agent:            opts.Agent,
 	})
 	for k, v := range envVars {
-		debugSession("SetEnvironment "+k, m.tmux.SetEnvironment(sessionID, k, v))
+		debugSession("SetEnvironment "+k, m.backend.SetEnvironment(sessionID, k, v))
 	}
 
 	// Fallback: set GT_AGENT from resolved config when no explicit --agent override.
@@ -340,32 +350,32 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// exec env, but tmux show-environment reads the session table, not process env.
 	// This mirrors the daemon's compensating logic (daemon.go ~line 1593-1595).
 	if _, hasGTAgent := envVars["GT_AGENT"]; !hasGTAgent && runtimeConfig.ResolvedAgent != "" {
-		debugSession("SetEnvironment GT_AGENT (resolved)", m.tmux.SetEnvironment(sessionID, "GT_AGENT", runtimeConfig.ResolvedAgent))
+		debugSession("SetEnvironment GT_AGENT (resolved)", m.backend.SetEnvironment(sessionID, "GT_AGENT", runtimeConfig.ResolvedAgent))
 	}
 
 	// Set GT_BRANCH and GT_POLECAT_PATH in tmux session environment.
 	// This ensures respawned processes also inherit these for gt done fallback.
 	if polecatGitBranch != "" {
-		debugSession("SetEnvironment GT_BRANCH", m.tmux.SetEnvironment(sessionID, "GT_BRANCH", polecatGitBranch))
+		debugSession("SetEnvironment GT_BRANCH", m.backend.SetEnvironment(sessionID, "GT_BRANCH", polecatGitBranch))
 	}
-	debugSession("SetEnvironment GT_POLECAT_PATH", m.tmux.SetEnvironment(sessionID, "GT_POLECAT_PATH", workDir))
-	debugSession("SetEnvironment GT_TOWN_ROOT", m.tmux.SetEnvironment(sessionID, "GT_TOWN_ROOT", townRoot))
+	debugSession("SetEnvironment GT_POLECAT_PATH", m.backend.SetEnvironment(sessionID, "GT_POLECAT_PATH", workDir))
+	debugSession("SetEnvironment GT_TOWN_ROOT", m.backend.SetEnvironment(sessionID, "GT_TOWN_ROOT", townRoot))
 
 	// Branch-per-polecat: set BD_BRANCH in tmux session environment
 	// This ensures respawned processes also inherit the branch setting.
 	if opts.DoltBranch != "" {
-		debugSession("SetEnvironment BD_BRANCH", m.tmux.SetEnvironment(sessionID, "BD_BRANCH", opts.DoltBranch))
+		debugSession("SetEnvironment BD_BRANCH", m.backend.SetEnvironment(sessionID, "BD_BRANCH", opts.DoltBranch))
 	}
 
 	// Disable Dolt auto-commit in tmux session environment (gt-5cc2p).
 	// This ensures respawned processes also inherit the setting.
-	debugSession("SetEnvironment BD_DOLT_AUTO_COMMIT", m.tmux.SetEnvironment(sessionID, "BD_DOLT_AUTO_COMMIT", "off"))
+	debugSession("SetEnvironment BD_DOLT_AUTO_COMMIT", m.backend.SetEnvironment(sessionID, "BD_DOLT_AUTO_COMMIT", "off"))
 
 	// Set GT_PROCESS_NAMES for accurate liveness detection. Custom agents may
 	// shadow built-in preset names (e.g., custom "codex" running "opencode"),
 	// so we resolve process names from both agent name and actual command.
 	processNames := config.ResolveProcessNames(runtimeConfig.ResolvedAgent, runtimeConfig.Command)
-	debugSession("SetEnvironment GT_PROCESS_NAMES", m.tmux.SetEnvironment(sessionID, "GT_PROCESS_NAMES", strings.Join(processNames, ",")))
+	debugSession("SetEnvironment GT_PROCESS_NAMES", m.backend.SetEnvironment(sessionID, "GT_PROCESS_NAMES", strings.Join(processNames, ",")))
 	// Hook the issue to the polecat if provided via --issue flag
 	if opts.Issue != "" {
 		agentID := fmt.Sprintf("%s/polecats/%s", m.rig.Name, polecat)
@@ -374,19 +384,21 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		}
 	}
 
-	// Apply theme (non-fatal)
-	theme := tmux.AssignTheme(m.rig.Name)
-	debugSession("ConfigureGasTownSession", m.tmux.ConfigureGasTownSession(sessionID, theme, m.rig.Name, polecat, "polecat"))
+	// Apply tmux-specific features (theming, hooks, wait-for-command, bypass dialog)
+	if extras, ok := m.backend.(session.TmuxExtras); ok {
+		theme := tmux.AssignTheme(m.rig.Name)
+		debugSession("ConfigureGasTownSession", extras.ConfigureGasTownSession(sessionID, theme, m.rig.Name, polecat, "polecat"))
 
-	// Set pane-died hook for crash detection (non-fatal)
-	agentID := fmt.Sprintf("%s/%s", m.rig.Name, polecat)
-	debugSession("SetPaneDiedHook", m.tmux.SetPaneDiedHook(sessionID, agentID))
+		agentID := fmt.Sprintf("%s/%s", m.rig.Name, polecat)
+		debugSession("SetPaneDiedHook", extras.SetPaneDiedHook(sessionID, agentID))
 
-	// Wait for Claude to start (non-fatal)
-	debugSession("WaitForCommand", m.tmux.WaitForCommand(sessionID, constants.SupportedShells, constants.ClaudeStartTimeout))
+		debugSession("WaitForCommand", extras.WaitForCommand(sessionID, constants.SupportedShells, constants.ClaudeStartTimeout))
 
-	// Accept bypass permissions warning dialog if it appears
-	debugSession("AcceptBypassPermissionsWarning", m.tmux.AcceptBypassPermissionsWarning(sessionID))
+		debugSession("AcceptBypassPermissionsWarning", extras.AcceptBypassPermissionsWarning(sessionID))
+	} else {
+		// Non-tmux backend: basic wait for session to be ready
+		time.Sleep(2 * time.Second)
+	}
 
 	// Wait for runtime to be fully ready at the prompt (not just started).
 	// Uses prompt-based polling for agents with ReadyPromptPrefix (e.g., Claude "❯ "),
@@ -398,11 +410,11 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	if fallbackInfo.SendBeaconNudge && fallbackInfo.SendStartupNudge && fallbackInfo.StartupNudgeDelayMs == 0 {
 		// Hooks + no prompt: Single combined nudge (hook already ran gt prime synchronously)
 		combined := beacon + "\n\n" + runtime.StartupNudgeContent()
-		debugSession("SendCombinedNudge", m.tmux.NudgeSession(sessionID, combined))
+		debugSession("SendCombinedNudge", m.backend.NudgeSession(sessionID, combined))
 	} else {
 		if fallbackInfo.SendBeaconNudge {
 			// Agent doesn't support CLI prompt - send beacon via nudge
-			debugSession("SendBeaconNudge", m.tmux.NudgeSession(sessionID, beacon))
+			debugSession("SendBeaconNudge", m.backend.NudgeSession(sessionID, beacon))
 		}
 
 		if fallbackInfo.StartupNudgeDelayMs > 0 {
@@ -414,16 +426,18 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 
 		if fallbackInfo.SendStartupNudge {
 			// Send work instructions via nudge
-			debugSession("SendStartupNudge", m.tmux.NudgeSession(sessionID, runtime.StartupNudgeContent()))
+			debugSession("SendStartupNudge", m.backend.NudgeSession(sessionID, runtime.StartupNudgeContent()))
 		}
 	}
 
-	// Legacy fallback for other startup paths (non-fatal)
-	_ = runtime.RunStartupFallback(m.tmux, sessionID, "polecat", runtimeConfig)
+	// Legacy fallback for other startup paths (tmux-specific, non-fatal)
+	if tmuxT, ok := m.backend.(*tmux.Tmux); ok {
+		_ = runtime.RunStartupFallback(tmuxT, sessionID, "polecat", runtimeConfig)
+	}
 
 	// Verify session survived startup - if the command crashed, the session may have died.
 	// Without this check, Start() would return success even if the pane died during initialization.
-	running, err = m.tmux.HasSession(sessionID)
+	running, err = m.backend.HasSession(sessionID)
 	if err != nil {
 		return fmt.Errorf("verifying session: %w", err)
 	}
@@ -434,17 +448,19 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// Validate GT_AGENT is set. Without GT_AGENT, IsAgentAlive falls back to
 	// ["node", "claude"] process detection and witness patrol will auto-nuke
 	// polecats running non-Claude agents (e.g., opencode). Fail fast.
-	gtAgent, _ := m.tmux.GetEnvironment(sessionID, "GT_AGENT")
+	gtAgent, _ := m.backend.GetEnvironment(sessionID, "GT_AGENT")
 	if gtAgent == "" {
-		_ = m.tmux.KillSessionWithProcesses(sessionID)
+		_ = m.backend.KillSessionWithProcesses(sessionID)
 		return fmt.Errorf("GT_AGENT not set in session %s (command=%q); "+
 			"witness patrol will misidentify this polecat as a zombie and auto-nuke it. "+
 			"Ensure RuntimeConfig.ResolvedAgent is set during agent config resolution",
 			sessionID, runtimeConfig.Command)
 	}
 
-	// Track PID for defense-in-depth orphan cleanup (non-fatal)
-	_ = session.TrackSessionPID(townRoot, sessionID, m.tmux)
+	// Track PID for defense-in-depth orphan cleanup (tmux-specific, non-fatal)
+	if tmuxT, ok := m.backend.(*tmux.Tmux); ok {
+		_ = session.TrackSessionPID(townRoot, sessionID, tmuxT)
+	}
 
 	return nil
 }
@@ -454,14 +470,19 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 // This happens when the agent crashes during startup but tmux keeps the dead pane.
 // Delegates to isSessionProcessDead to avoid duplicating process-check logic (gt-qgzj1h).
 func (m *SessionManager) isSessionStale(sessionID string) bool {
-	return isSessionProcessDead(m.tmux, sessionID)
+	// isSessionProcessDead requires *tmux.Tmux for GetPanePID. For other backends,
+	// check if agent is alive as a proxy for staleness.
+	if tmuxT, ok := m.backend.(*tmux.Tmux); ok {
+		return isSessionProcessDead(tmuxT, sessionID)
+	}
+	return !m.backend.IsAgentAlive(sessionID)
 }
 
 // Stop terminates a polecat session.
 func (m *SessionManager) Stop(polecat string, force bool) error {
 	sessionID := m.SessionName(polecat)
 
-	running, err := m.tmux.HasSession(sessionID)
+	running, err := m.backend.HasSession(sessionID)
 	if err != nil {
 		return fmt.Errorf("checking session: %w", err)
 	}
@@ -471,13 +492,24 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 
 	// Try graceful shutdown first
 	if !force {
-		_ = m.tmux.SendKeysRaw(sessionID, "C-c")
-		session.WaitForSessionExit(m.tmux, sessionID, constants.GracefulShutdownTimeout)
+		_ = m.backend.SendKeysRaw(sessionID, "C-c")
+		if tmuxT, ok := m.backend.(*tmux.Tmux); ok {
+			session.WaitForSessionExit(tmuxT, sessionID, constants.GracefulShutdownTimeout)
+		} else {
+			// Non-tmux: poll HasSession until exit or timeout
+			deadline := time.Now().Add(constants.GracefulShutdownTimeout)
+			for time.Now().Before(deadline) {
+				if alive, _ := m.backend.HasSession(sessionID); !alive {
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+		}
 	}
 
 	// Use KillSessionWithProcesses to ensure all descendant processes are killed.
 	// This prevents orphan bash processes from Claude's Bash tool surviving session termination.
-	if err := m.tmux.KillSessionWithProcesses(sessionID); err != nil {
+	if err := m.backend.KillSessionWithProcesses(sessionID); err != nil {
 		return fmt.Errorf("killing session: %w", err)
 	}
 
@@ -489,7 +521,7 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 // reporting zombie sessions (tmux alive but Claude dead) as "running".
 func (m *SessionManager) IsRunning(polecat string) (bool, error) {
 	sessionID := m.SessionName(polecat)
-	status := m.tmux.CheckSessionHealth(sessionID, 0)
+	status := m.backend.CheckSessionHealth(sessionID, 0)
 	return status == tmux.SessionHealthy, nil
 }
 
@@ -497,7 +529,7 @@ func (m *SessionManager) IsRunning(polecat string) (bool, error) {
 func (m *SessionManager) Status(polecat string) (*SessionInfo, error) {
 	sessionID := m.SessionName(polecat)
 
-	running, err := m.tmux.HasSession(sessionID)
+	running, err := m.backend.HasSession(sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("checking session: %w", err)
 	}
@@ -513,34 +545,35 @@ func (m *SessionManager) Status(polecat string) (*SessionInfo, error) {
 		return info, nil
 	}
 
-	tmuxInfo, err := m.tmux.GetSessionInfo(sessionID)
-	if err != nil {
-		return info, nil
-	}
+	// GetSessionInfo is tmux-specific; populate fields if available.
+	if tmuxT, ok := m.backend.(*tmux.Tmux); ok {
+		tmuxInfo, err := tmuxT.GetSessionInfo(sessionID)
+		if err == nil {
+			info.Attached = tmuxInfo.Attached
+			info.Windows = tmuxInfo.Windows
 
-	info.Attached = tmuxInfo.Attached
-	info.Windows = tmuxInfo.Windows
-
-	if tmuxInfo.Created != "" {
-		formats := []string{
-			"2006-01-02 15:04:05",
-			"Mon Jan 2 15:04:05 2006",
-			"Mon Jan _2 15:04:05 2006",
-			time.ANSIC,
-			time.UnixDate,
-		}
-		for _, format := range formats {
-			if t, err := time.Parse(format, tmuxInfo.Created); err == nil {
-				info.Created = t
-				break
+			if tmuxInfo.Created != "" {
+				formats := []string{
+					"2006-01-02 15:04:05",
+					"Mon Jan 2 15:04:05 2006",
+					"Mon Jan _2 15:04:05 2006",
+					time.ANSIC,
+					time.UnixDate,
+				}
+				for _, format := range formats {
+					if t, err := time.Parse(format, tmuxInfo.Created); err == nil {
+						info.Created = t
+						break
+					}
+				}
 			}
-		}
-	}
 
-	if tmuxInfo.Activity != "" {
-		var activityUnix int64
-		if _, err := fmt.Sscanf(tmuxInfo.Activity, "%d", &activityUnix); err == nil && activityUnix > 0 {
-			info.LastActivity = time.Unix(activityUnix, 0)
+			if tmuxInfo.Activity != "" {
+				var activityUnix int64
+				if _, err := fmt.Sscanf(tmuxInfo.Activity, "%d", &activityUnix); err == nil && activityUnix > 0 {
+					info.LastActivity = time.Unix(activityUnix, 0)
+				}
+			}
 		}
 	}
 
@@ -551,7 +584,7 @@ func (m *SessionManager) Status(polecat string) (*SessionInfo, error) {
 // This includes polecats, witness, refinery, and crew sessions.
 // Use ListPolecats() to get only polecat sessions.
 func (m *SessionManager) List() ([]SessionInfo, error) {
-	sessions, err := m.tmux.ListSessions()
+	sessions, err := m.backend.ListSessions()
 	if err != nil {
 		return nil, err
 	}
@@ -600,7 +633,7 @@ func (m *SessionManager) ListPolecats() ([]SessionInfo, error) {
 func (m *SessionManager) Attach(polecat string) error {
 	sessionID := m.SessionName(polecat)
 
-	running, err := m.tmux.HasSession(sessionID)
+	running, err := m.backend.HasSession(sessionID)
 	if err != nil {
 		return fmt.Errorf("checking session: %w", err)
 	}
@@ -608,14 +641,14 @@ func (m *SessionManager) Attach(polecat string) error {
 		return ErrSessionNotFound
 	}
 
-	return m.tmux.AttachSession(sessionID)
+	return m.backend.AttachSession(sessionID)
 }
 
 // Capture returns the recent output from a polecat session.
 func (m *SessionManager) Capture(polecat string, lines int) (string, error) {
 	sessionID := m.SessionName(polecat)
 
-	running, err := m.tmux.HasSession(sessionID)
+	running, err := m.backend.HasSession(sessionID)
 	if err != nil {
 		return "", fmt.Errorf("checking session: %w", err)
 	}
@@ -623,12 +656,12 @@ func (m *SessionManager) Capture(polecat string, lines int) (string, error) {
 		return "", ErrSessionNotFound
 	}
 
-	return m.tmux.CapturePane(sessionID, lines)
+	return m.backend.CapturePane(sessionID, lines)
 }
 
 // CaptureSession returns the recent output from a session by raw session ID.
 func (m *SessionManager) CaptureSession(sessionID string, lines int) (string, error) {
-	running, err := m.tmux.HasSession(sessionID)
+	running, err := m.backend.HasSession(sessionID)
 	if err != nil {
 		return "", fmt.Errorf("checking session: %w", err)
 	}
@@ -636,14 +669,14 @@ func (m *SessionManager) CaptureSession(sessionID string, lines int) (string, er
 		return "", ErrSessionNotFound
 	}
 
-	return m.tmux.CapturePane(sessionID, lines)
+	return m.backend.CapturePane(sessionID, lines)
 }
 
 // Inject sends a message to a polecat session.
 func (m *SessionManager) Inject(polecat, message string) error {
 	sessionID := m.SessionName(polecat)
 
-	running, err := m.tmux.HasSession(sessionID)
+	running, err := m.backend.HasSession(sessionID)
 	if err != nil {
 		return fmt.Errorf("checking session: %w", err)
 	}
@@ -651,12 +684,15 @@ func (m *SessionManager) Inject(polecat, message string) error {
 		return ErrSessionNotFound
 	}
 
-	debounceMs := 200 + (len(message)/1024)*100
-	if debounceMs > 1500 {
-		debounceMs = 1500
+	// Use debounced send if available (tmux-specific), otherwise fall back to regular send.
+	if extras, ok := m.backend.(session.TmuxExtras); ok {
+		debounceMs := 200 + (len(message)/1024)*100
+		if debounceMs > 1500 {
+			debounceMs = 1500
+		}
+		return extras.SendKeysDebounced(sessionID, message, debounceMs)
 	}
-
-	return m.tmux.SendKeysDebounced(sessionID, message, debounceMs)
+	return m.backend.SendKeys(sessionID, message)
 }
 
 // StopAll terminates all polecat sessions for this rig.

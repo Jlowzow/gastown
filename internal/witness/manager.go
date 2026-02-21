@@ -39,13 +39,18 @@ func NewManager(r *rig.Rig) *Manager {
 	}
 }
 
+// backend returns the configured session backend (tmux or amux).
+func (m *Manager) backend() session.SessionBackend {
+	return session.NewBackend()
+}
+
 // IsRunning checks if the witness session is active and healthy.
-// Checks both tmux session existence AND agent process liveness to avoid
-// reporting zombie sessions (tmux alive but Claude dead) as "running".
-// ZFC: tmux session existence is the source of truth for session state,
+// Checks both session existence AND agent process liveness to avoid
+// reporting zombie sessions (session alive but Claude dead) as "running".
+// ZFC: session existence is the source of truth for session state,
 // but agent liveness determines if the session is actually functional.
 func (m *Manager) IsRunning() (bool, error) {
-	t := tmux.NewTmux()
+	t := m.backend()
 	status := t.CheckSessionHealth(m.SessionName(), 0)
 	return status == tmux.SessionHealthy, nil
 }
@@ -56,7 +61,7 @@ func (m *Manager) IsRunning() (bool, error) {
 // Returns the detailed ZombieStatus for callers that need to distinguish
 // between different failure modes.
 func (m *Manager) IsHealthy(maxInactivity time.Duration) tmux.ZombieStatus {
-	t := tmux.NewTmux()
+	t := m.backend()
 	return t.CheckSessionHealth(m.SessionName(), maxInactivity)
 }
 
@@ -66,9 +71,9 @@ func (m *Manager) SessionName() string {
 }
 
 // Status returns information about the witness session.
-// ZFC-compliant: tmux session is the source of truth.
+// ZFC-compliant: session existence is the source of truth.
 func (m *Manager) Status() (*tmux.SessionInfo, error) {
-	t := tmux.NewTmux()
+	t := m.backend()
 	sessionID := m.SessionName()
 
 	running, err := t.HasSession(sessionID)
@@ -79,7 +84,11 @@ func (m *Manager) Status() (*tmux.SessionInfo, error) {
 		return nil, ErrNotRunning
 	}
 
-	return t.GetSessionInfo(sessionID)
+	// GetSessionInfo is tmux-specific; for other backends, return basic info.
+	if tmuxT, ok := t.(*tmux.Tmux); ok {
+		return tmuxT.GetSessionInfo(sessionID)
+	}
+	return &tmux.SessionInfo{Name: sessionID}, nil
 }
 
 // witnessDir returns the working directory for the witness.
@@ -105,7 +114,7 @@ func (m *Manager) witnessDir() string {
 // envOverrides are KEY=VALUE pairs that override all other env var sources.
 // ZFC-compliant: no state file, tmux session is source of truth.
 func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []string) error {
-	t := tmux.NewTmux()
+	t := m.backend()
 	sessionID := m.SessionName()
 
 	if foreground {
@@ -121,13 +130,13 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 			// Healthy - Claude is running
 			return ErrAlreadyRunning
 		}
-		// Zombie - tmux alive but Claude dead. Kill and recreate.
+		// Zombie - session alive but Claude dead. Kill and recreate.
 		if err := t.KillSession(sessionID); err != nil {
 			return fmt.Errorf("killing zombie session: %w", err)
 		}
 	}
 
-	// Note: No PID check per ZFC - tmux session is the source of truth
+	// Note: No PID check per ZFC - session existence is the source of truth
 
 	// Working directory
 	witnessDir := m.witnessDir()
@@ -156,7 +165,7 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 
 	// Build startup command first
 	// NOTE: No gt prime injection needed - SessionStart hook handles it automatically
-	// Export GT_ROLE and BD_ACTOR in the command since tmux SetEnvironment only affects new panes
+	// Export GT_ROLE and BD_ACTOR in the command since SetEnvironment only affects new panes
 	// Pass m.rig.Path so rig agent settings are honored (not town-level defaults)
 	command, err := buildWitnessStartCommand(m.rig.Path, m.rig.Name, townRoot, sessionID, agentOverride, roleConfig)
 	if err != nil {
@@ -166,7 +175,7 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 	// Create session with command directly to avoid send-keys race condition.
 	// See: https://github.com/anthropics/gastown/issues/280
 	if err := t.NewSessionWithCommand(sessionID, witnessDir, command); err != nil {
-		return fmt.Errorf("creating tmux session: %w", err)
+		return fmt.Errorf("creating session: %w", err)
 	}
 
 	// Set environment variables (non-fatal: session works without these)
@@ -191,25 +200,30 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 		}
 	}
 
-	// Apply Gas Town theming (non-fatal: theming failure doesn't affect operation)
-	theme := tmux.AssignTheme(m.rig.Name)
-	_ = t.ConfigureGasTownSession(sessionID, theme, m.rig.Name, "witness", "witness")
+	// Apply tmux-specific features (theming, wait-for-command, bypass dialog)
+	if extras, ok := t.(session.TmuxExtras); ok {
+		theme := tmux.AssignTheme(m.rig.Name)
+		_ = extras.ConfigureGasTownSession(sessionID, theme, m.rig.Name, "witness", "witness")
 
-	// Wait for Claude to start - fatal if Claude fails to launch
-	if err := t.WaitForCommand(sessionID, constants.SupportedShells, constants.ClaudeStartTimeout); err != nil {
-		// Kill the zombie session before returning error
-		_ = t.KillSessionWithProcesses(sessionID)
-		return fmt.Errorf("waiting for witness to start: %w", err)
+		// Wait for Claude to start - fatal if Claude fails to launch
+		if err := extras.WaitForCommand(sessionID, constants.SupportedShells, constants.ClaudeStartTimeout); err != nil {
+			_ = t.KillSessionWithProcesses(sessionID)
+			return fmt.Errorf("waiting for witness to start: %w", err)
+		}
+
+		if err := extras.AcceptBypassPermissionsWarning(sessionID); err != nil {
+			log.Printf("warning: accepting bypass permissions for %s: %v", sessionID, err)
+		}
+	} else {
+		// Non-tmux backend: basic wait for session to be ready
+		time.Sleep(2 * time.Second)
 	}
 
-	// Accept bypass permissions warning dialog if it appears.
-	if err := t.AcceptBypassPermissionsWarning(sessionID); err != nil {
-		log.Printf("warning: accepting bypass permissions for %s: %v", sessionID, err)
-	}
-
-	// Track PID for defense-in-depth orphan cleanup (non-fatal)
-	if err := session.TrackSessionPID(townRoot, sessionID, t); err != nil {
-		log.Printf("warning: tracking session PID for %s: %v", sessionID, err)
+	// Track PID for defense-in-depth orphan cleanup (tmux-specific, non-fatal)
+	if tmuxT, ok := t.(*tmux.Tmux); ok {
+		if err := session.TrackSessionPID(townRoot, sessionID, tmuxT); err != nil {
+			log.Printf("warning: tracking session PID for %s: %v", sessionID, err)
+		}
 	}
 
 	time.Sleep(constants.ShutdownNotifyDelay)
@@ -274,17 +288,15 @@ func buildWitnessStartCommand(rigPath, rigName, townRoot, sessionName, agentOver
 }
 
 // Stop stops the witness.
-// ZFC-compliant: tmux session is the source of truth.
+// ZFC-compliant: session existence is the source of truth.
 func (m *Manager) Stop() error {
-	t := tmux.NewTmux()
+	t := m.backend()
 	sessionID := m.SessionName()
 
-	// Check if tmux session exists
 	running, _ := t.HasSession(sessionID)
 	if !running {
 		return ErrNotRunning
 	}
 
-	// Kill the tmux session
 	return t.KillSession(sessionID)
 }
