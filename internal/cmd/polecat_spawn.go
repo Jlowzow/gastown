@@ -334,10 +334,15 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 	return pane, nil
 }
 
-// CreateDoltBranch flushes the main working set to HEAD and creates the polecat's
+// CreateDoltBranch flushes working sets to HEAD and creates the polecat's
 // Dolt branch. Must be called AFTER all sling writes (hook, formula, fields) so the
 // branch fork includes everything. This fixes the visibility gap where DOLT_BRANCH
 // forks from HEAD but BD_DOLT_AUTO_COMMIT=off leaves writes in working set only.
+//
+// Flushes BOTH the rig database AND the beads database, since sling writes
+// agent beads (with hook_bead) to the beads database. Without flushing beads,
+// the polecat's auto-created branch in the beads DB forks from HEAD which
+// doesn't include the uncommitted hook data (gt-v9ri: polecat hook visibility bug).
 //
 // On error, callers are responsible for cleaning up the spawned polecat (worktree,
 // agent bead) and unhooking any attached beads. See rollbackSlingArtifacts for the
@@ -350,7 +355,22 @@ func (s *SpawnedPolecatInfo) CreateDoltBranch() error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	// Flush main working set to HEAD so DOLT_BRANCH includes all sling writes
+
+	// Flush the beads database working set first. Sling writes agent beads
+	// (with hook_bead slot) to the beads DB via bd commands. With
+	// BD_DOLT_AUTO_COMMIT=off, these writes stay in the working set.
+	// The polecat's bd instance auto-creates its branch from HEAD on first
+	// access (DOLT_CHECKOUT -> DOLT_BRANCH), so HEAD must include the hook data.
+	beadsDB := doltserver.RigBeadsDoltDatabase(townRoot, s.RigName)
+	if beadsDB != "" && beadsDB != s.RigName {
+		if err := doltserver.CommitServerWorkingSet(townRoot, beadsDB, "sling: flush beads for "+s.PolecatName); err != nil {
+			// Warn but don't fail — rig flush + branch creation can still proceed.
+			// The polecat may not see its hook, but that's better than blocking spawn entirely.
+			fmt.Printf("%s Could not flush beads DB %s: %v\n", style.Dim.Render("Warning:"), beadsDB, err)
+		}
+	}
+
+	// Flush rig database working set to HEAD so DOLT_BRANCH includes all sling writes
 	if err := doltserver.CommitServerWorkingSet(townRoot, s.RigName, "sling: flush for "+s.PolecatName); err != nil {
 		return fmt.Errorf("flushing working set for %s: %w", s.PolecatName, err)
 	}

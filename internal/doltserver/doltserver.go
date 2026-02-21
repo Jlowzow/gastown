@@ -1559,6 +1559,17 @@ func FindOrphanedDatabases(townRoot string) ([]OrphanedDatabase, error) {
 	return orphans, nil
 }
 
+// RigBeadsDoltDatabase returns the Dolt database name for a rig's beads.
+// This reads the dolt_database field from the rig's .beads/metadata.json.
+// Returns empty string if not configured or not using Dolt server mode.
+func RigBeadsDoltDatabase(townRoot, rigName string) string {
+	beadsDir := FindRigBeadsDir(townRoot, rigName)
+	if beadsDir == "" {
+		return ""
+	}
+	return readExistingDoltDatabase(beadsDir)
+}
+
 // readExistingDoltDatabase reads the dolt_database field from an existing metadata.json.
 // Returns empty string if the file doesn't exist or can't be read.
 func readExistingDoltDatabase(beadsDir string) string {

@@ -847,12 +847,30 @@ notifyWitness:
 
 	if bdBranch := os.Getenv("BD_BRANCH"); bdBranch != "" {
 		fmt.Printf("Merging Dolt branch %s to main...\n", bdBranch)
+
+		// Merge rig database branch (e.g., gastown)
 		if err := doltserver.MergePolecatBranch(townRoot, rigName, bdBranch); err != nil {
 			mergeFailed = true
 			style.PrintWarning("could not merge Dolt branch: %v (data still on branch %s)", err, bdBranch)
 		} else {
 			fmt.Printf("%s Dolt branch merged to main\n", style.Bold.Render("✓"))
 		}
+
+		// Also merge beads database branch if it differs from the rig database.
+		// Polecat bd writes (agent bead updates, issue status changes) go to the
+		// beads DB branch. Without merging, these changes are stranded on a dead
+		// branch and invisible to other agents. (gt-v9ri: polecat hook visibility)
+		beadsDB := doltserver.RigBeadsDoltDatabase(townRoot, rigName)
+		if beadsDB != "" && beadsDB != rigName {
+			if err := doltserver.MergePolecatBranch(townRoot, beadsDB, bdBranch); err != nil {
+				// Warn but don't set mergeFailed — rig merge succeeded,
+				// and beads branch data will be picked up on next flush.
+				style.PrintWarning("could not merge beads Dolt branch %s in %s: %v", bdBranch, beadsDB, err)
+			} else {
+				fmt.Printf("%s Beads Dolt branch merged to main\n", style.Bold.Render("✓"))
+			}
+		}
+
 		// Unset BD_BRANCH so subsequent bd operations (updateAgentStateOnDone)
 		// write directly to main instead of the now-deleted branch.
 		// Note: this is a lifecycle transition (branch deleted). The systematic fix
