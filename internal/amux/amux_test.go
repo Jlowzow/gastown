@@ -2,7 +2,6 @@ package amux
 
 import (
 	"errors"
-	"os"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/session"
@@ -87,36 +86,27 @@ func TestWrapError_GenericWithoutStderr(t *testing.T) {
 	}
 }
 
-func TestSendKeys_ReturnsNotSupported(t *testing.T) {
+func TestSendKeys_NoSession_ReturnsError(t *testing.T) {
 	a := NewAmux()
-	err := a.SendKeys("test-session", "hello")
+	err := a.SendKeys("nonexistent-session", "hello")
 	if err == nil {
-		t.Fatal("expected error from SendKeys")
-	}
-	if !errors.Is(err, ErrSendKeysNotSupport) {
-		t.Errorf("SendKeys error = %v, want ErrSendKeysNotSupport", err)
+		t.Fatal("expected error from SendKeys on nonexistent session")
 	}
 }
 
-func TestSetEnvironment_ReturnsNotImplemented(t *testing.T) {
+func TestSetEnvironment_NoSession_ReturnsError(t *testing.T) {
 	a := NewAmux()
-	err := a.SetEnvironment("test-session", "KEY", "VALUE")
+	err := a.SetEnvironment("nonexistent-session", "KEY", "VALUE")
 	if err == nil {
-		t.Fatal("expected error from SetEnvironment")
-	}
-	if !errors.Is(err, ErrNotImplemented) {
-		t.Errorf("SetEnvironment error = %v, want ErrNotImplemented", err)
+		t.Fatal("expected error from SetEnvironment on nonexistent session")
 	}
 }
 
-func TestGetEnvironment_ReturnsNotImplemented(t *testing.T) {
+func TestGetEnvironment_NoSession_ReturnsError(t *testing.T) {
 	a := NewAmux()
-	_, err := a.GetEnvironment("test-session", "KEY")
+	_, err := a.GetEnvironment("nonexistent-session", "KEY")
 	if err == nil {
-		t.Fatal("expected error from GetEnvironment")
-	}
-	if !errors.Is(err, ErrNotImplemented) {
-		t.Errorf("GetEnvironment error = %v, want ErrNotImplemented", err)
+		t.Fatal("expected error from GetEnvironment on nonexistent session")
 	}
 }
 
@@ -129,63 +119,6 @@ func TestGetSessionSet_ReturnsSessionSet(t *testing.T) {
 	}
 	if set.Has("c") {
 		t.Error("SessionSet should not contain 'c'")
-	}
-}
-
-func TestBuildEnv(t *testing.T) {
-	env := buildEnv(map[string]string{
-		"TEST_AMUX_KEY": "test_value",
-	})
-
-	found := false
-	for _, e := range env {
-		if e == "TEST_AMUX_KEY=test_value" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("buildEnv should include TEST_AMUX_KEY=test_value")
-	}
-
-	// Should also include inherited env vars
-	home := os.Getenv("HOME")
-	if home != "" {
-		foundHome := false
-		for _, e := range env {
-			if e == "HOME="+home {
-				foundHome = true
-				break
-			}
-		}
-		if !foundHome {
-			t.Error("buildEnv should inherit HOME from current env")
-		}
-	}
-}
-
-func TestBuildEnv_OverridesExisting(t *testing.T) {
-	// Set a known env var, then override it
-	orig := os.Getenv("PATH")
-	env := buildEnv(map[string]string{
-		"PATH": "/custom/path",
-	})
-
-	foundCustom := false
-	foundOrig := false
-	for _, e := range env {
-		if e == "PATH=/custom/path" {
-			foundCustom = true
-		}
-		if e == "PATH="+orig {
-			foundOrig = true
-		}
-	}
-	if !foundCustom {
-		t.Error("buildEnv should override PATH with custom value")
-	}
-	if foundOrig {
-		t.Error("buildEnv should not retain original PATH when overridden")
 	}
 }
 

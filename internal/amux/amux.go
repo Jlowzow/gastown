@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -25,11 +24,9 @@ var sessionNudgeLocks sync.Map // map[string]chan struct{}
 
 // Common errors
 var (
-	ErrNoDaemon           = errors.New("amux daemon not running")
-	ErrSessionExists      = errors.New("session already exists")
-	ErrSessionNotFound    = errors.New("session not found")
-	ErrNotImplemented     = errors.New("not yet implemented in amux")
-	ErrSendKeysNotSupport = errors.New("amux send not yet available (reverted); see gt-1nr")
+	ErrNoDaemon        = errors.New("amux daemon not running")
+	ErrSessionExists   = errors.New("session already exists")
+	ErrSessionNotFound = errors.New("session not found")
 )
 
 // Amux wraps amux CLI operations, implementing the SessionBackend interface.
@@ -80,51 +77,45 @@ func (a *Amux) wrapError(err error, stderr string, args []string) error {
 	return fmt.Errorf("amux %s: %w", args[0], err)
 }
 
+// wrapCommand prepends a cd to workDir if provided, wrapping the command in a shell.
+func wrapCommand(workDir, command string) string {
+	if workDir == "" {
+		return command
+	}
+	return fmt.Sprintf("cd %s && exec %s", shellQuote(workDir), command)
+}
+
+// shellQuote wraps a string in single quotes for safe shell expansion.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
 // NewSession creates a new detached amux session.
 func (a *Amux) NewSession(name, workDir string) error {
-	args := []string{"new", "-t", name}
-	if workDir != "" {
-		args = append(args, "-d", workDir)
-	}
-	args = append(args, "--", "/bin/zsh")
+	cmd := wrapCommand(workDir, "/bin/zsh")
+	args := []string{"new", "-d", "-t", name, "--", "/bin/sh", "-c", cmd}
 	_, err := a.run(args...)
 	return err
 }
 
 // NewSessionWithCommand creates a new detached amux session running a command.
 func (a *Amux) NewSessionWithCommand(name, workDir, command string) error {
-	args := []string{"new", "-t", name}
-	if workDir != "" {
-		args = append(args, "-d", workDir)
-	}
-	args = append(args, "--", command)
+	cmd := wrapCommand(workDir, command)
+	args := []string{"new", "-d", "-t", name, "--", "/bin/sh", "-c", cmd}
 	_, err := a.run(args...)
 	return err
 }
 
 // NewSessionWithCommandAndEnv creates a new detached amux session with env vars.
-// NOTE: amux does not yet support -e flag. Uses os/exec Env field as a workaround.
-// TODO(gt-1nr): Use amux -e flag once implemented.
 func (a *Amux) NewSessionWithCommandAndEnv(name, workDir, command string, env map[string]string) error {
-	args := []string{"new", "-t", name}
-	if workDir != "" {
-		args = append(args, "-d", workDir)
+	cmd := wrapCommand(workDir, command)
+	args := []string{"new", "-d", "-t", name}
+	for k, v := range env {
+		args = append(args, "-e", k+"="+v)
 	}
-	args = append(args, "--", command)
-
-	cmd := exec.Command("amux", args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	// Build env: inherit current env and overlay provided vars
-	cmd.Env = buildEnv(env)
-
-	err := cmd.Run()
-	if err != nil {
-		return a.wrapError(err, stderr.String(), args)
-	}
-	return nil
+	args = append(args, "--", "/bin/sh", "-c", cmd)
+	_, err := a.run(args...)
+	return err
 }
 
 // KillSession terminates an amux session.
@@ -142,13 +133,13 @@ func (a *Amux) KillSessionWithProcesses(name string) error {
 }
 
 // HasSession checks if a session exists.
+// amux has exits 0 if the session exists, non-zero otherwise.
 func (a *Amux) HasSession(name string) (bool, error) {
 	_, err := a.run("has", "-t", name)
 	if err != nil {
-		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoDaemon) {
-			return false, nil
-		}
-		return false, err
+		// amux has returns exit 1 for nonexistent sessions (no stderr).
+		// Treat any error as "not found" rather than propagating.
+		return false, nil
 	}
 	return true, nil
 }
@@ -194,16 +185,12 @@ func (a *Amux) GetSessionSet() (*tmux.SessionSet, error) {
 }
 
 // SendKeys sends keystrokes to a session.
-// NOTE: amux send was reverted and is not yet available.
-// This returns an error until amux send is reimplemented.
-// TODO(gt-1nr): Implement once amux send is available.
 func (a *Amux) SendKeys(session, keys string) error {
-	return fmt.Errorf("%w: SendKeys(%q)", ErrSendKeysNotSupport, session)
+	_, err := a.run("send", "-t", session, "-l", keys)
+	return err
 }
 
 // NudgeSession sends a message to an amux session with nudge lock serialization.
-// NOTE: Depends on SendKeys, which is not yet available.
-// TODO(gt-1nr): Implement once amux send is available.
 func (a *Amux) NudgeSession(session, message string) error {
 	// Serialize nudges to this session to prevent interleaving.
 	if !acquireNudgeLock(session, nudgeLockTimeout) {
@@ -220,17 +207,14 @@ func (a *Amux) CapturePane(session string, lines int) (string, error) {
 }
 
 // SetEnvironment sets an environment variable in the session.
-// NOTE: amux does not yet support session-level environment variables.
-// TODO(gt-1nr): Implement once amux supports set-environment.
 func (a *Amux) SetEnvironment(session, key, value string) error {
-	return fmt.Errorf("%w: SetEnvironment(%q, %q)", ErrNotImplemented, session, key)
+	_, err := a.run("env", "set", "-t", session, key, value)
+	return err
 }
 
 // GetEnvironment gets an environment variable from the session.
-// NOTE: amux does not yet support session-level environment variables.
-// TODO(gt-1nr): Implement once amux supports get-environment.
 func (a *Amux) GetEnvironment(session, key string) (string, error) {
-	return "", fmt.Errorf("%w: GetEnvironment(%q, %q)", ErrNotImplemented, session, key)
+	return a.run("env", "get", "-t", session, key)
 }
 
 // IsAgentRunning checks if an agent appears to be running in the session.
@@ -264,31 +248,6 @@ func (a *Amux) IsAgentAlive(session string) bool {
 func (a *Amux) IsAvailable() bool {
 	_, err := a.run("ls")
 	return err == nil
-}
-
-// buildEnv constructs an environment slice by inheriting the current process
-// env and overlaying the provided key-value pairs.
-func buildEnv(env map[string]string) []string {
-	// Start from current process environment
-	base := make(map[string]string)
-	for _, e := range os.Environ() {
-		parts := strings.SplitN(e, "=", 2)
-		if len(parts) == 2 {
-			base[parts[0]] = parts[1]
-		}
-	}
-
-	// Overlay provided vars
-	for k, v := range env {
-		base[k] = v
-	}
-
-	// Convert to slice
-	result := make([]string, 0, len(base))
-	for k, v := range base {
-		result = append(result, k+"="+v)
-	}
-	return result
 }
 
 // getSessionNudgeSem returns the channel semaphore for serializing nudges.
