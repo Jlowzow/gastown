@@ -118,22 +118,25 @@ type StartResult struct {
 	RuntimeConfig *config.RuntimeConfig
 }
 
-// StartSession creates a tmux session following the standard Gas Town lifecycle.
+// StartSession creates a session following the standard Gas Town lifecycle.
+// Accepts any SessionBackend (tmux or amux). Tmux-specific features
+// (themes, remain-on-exit, auto-respawn) are applied only when the
+// backend supports them (via TmuxExtras interface).
 //
 // The lifecycle handles:
 //  1. Resolve runtime config for the role
 //  2. Ensure settings/plugins exist for the agent
 //  3. Build startup command (if not provided)
-//  4. Create tmux session with command
+//  4. Create session with command
 //  5. Set environment variables (standard + extra)
-//  6. Apply theme (if configured)
+//  6. Apply theme (if tmux backend)
 //  7. Optional post-start: wait for agent, accept bypass, ready delay,
 //     auto-respawn, PID tracking, verify survived
 //
 // Role-specific concerns (issue validation, fallback nudges, pane-died hooks,
 // crew cycle bindings, etc.) should be handled by the caller before/after
 // calling StartSession.
-func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error) {
+func StartSession(t SessionBackend, cfg SessionConfig) (_ *StartResult, retErr error) {
 	defer func() { telemetry.RecordSessionStart(context.Background(), cfg.SessionID, cfg.Role, retErr) }()
 	if cfg.SessionID == "" {
 		return nil, fmt.Errorf("SessionID is required")
@@ -185,9 +188,11 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 		return nil, fmt.Errorf("creating session: %w", err)
 	}
 
-	// 5. Set remain-on-exit immediately if requested (before anything else can fail).
+	// 5. Set remain-on-exit immediately if requested (tmux-specific).
 	if cfg.RemainOnExit {
-		_ = t.SetRemainOnExit(cfg.SessionID, true)
+		if extras, ok := t.(TmuxExtras); ok {
+			_ = extras.SetRemainOnExit(cfg.SessionID, true)
+		}
 	}
 
 	// 6. Set environment variables.
@@ -207,31 +212,42 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 		_ = t.SetEnvironment(cfg.SessionID, k, cfg.ExtraEnv[k])
 	}
 
-	// 7. Apply theme.
+	// 7. Apply theme (tmux-specific).
 	if cfg.Theme != nil {
-		_ = t.ConfigureGasTownSession(cfg.SessionID, *cfg.Theme, cfg.RigName, cfg.AgentName, cfg.Role)
+		if extras, ok := t.(TmuxExtras); ok {
+			_ = extras.ConfigureGasTownSession(cfg.SessionID, *cfg.Theme, cfg.RigName, cfg.AgentName, cfg.Role)
+		}
 	}
 
 	// 8. Wait for agent to start.
 	if cfg.WaitForAgent {
-		if err := t.WaitForCommand(cfg.SessionID, constants.SupportedShells, constants.ClaudeStartTimeout); err != nil {
-			if cfg.WaitFatal {
-				_ = t.KillSessionWithProcesses(cfg.SessionID)
-				return nil, fmt.Errorf("waiting for %s to start: %w", cfg.Role, err)
+		if extras, ok := t.(TmuxExtras); ok {
+			if err := extras.WaitForCommand(cfg.SessionID, constants.SupportedShells, constants.ClaudeStartTimeout); err != nil {
+				if cfg.WaitFatal {
+					_ = t.KillSessionWithProcesses(cfg.SessionID)
+					return nil, fmt.Errorf("waiting for %s to start: %w", cfg.Role, err)
+				}
+			}
+		} else {
+			// Non-tmux backend: poll HasSession as a basic liveness check.
+			time.Sleep(2 * time.Second)
+		}
+	}
+
+	// 9. Auto-respawn hook (tmux-specific).
+	if cfg.AutoRespawn {
+		if extras, ok := t.(TmuxExtras); ok {
+			if err := extras.SetAutoRespawnHook(cfg.SessionID); err != nil {
+				fmt.Printf("warning: failed to set auto-respawn hook for %s: %v\n", cfg.Role, err)
 			}
 		}
 	}
 
-	// 9. Auto-respawn hook.
-	if cfg.AutoRespawn {
-		if err := t.SetAutoRespawnHook(cfg.SessionID); err != nil {
-			fmt.Printf("warning: failed to set auto-respawn hook for %s: %v\n", cfg.Role, err)
-		}
-	}
-
-	// 10. Accept bypass permissions warning.
+	// 10. Accept bypass permissions warning (tmux-specific).
 	if cfg.AcceptBypass {
-		_ = t.AcceptBypassPermissionsWarning(cfg.SessionID)
+		if extras, ok := t.(TmuxExtras); ok {
+			_ = extras.AcceptBypassPermissionsWarning(cfg.SessionID)
+		}
 	}
 
 	// 11. Ready delay: wait for agent to be fully ready at the prompt.
@@ -256,19 +272,21 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 		}
 	}
 
-	// 13. Track PID for defense-in-depth orphan cleanup.
+	// 13. Track PID for defense-in-depth orphan cleanup (tmux-specific).
 	if cfg.TrackPID && cfg.TownRoot != "" {
-		_ = TrackSessionPID(cfg.TownRoot, cfg.SessionID, t)
+		if tmuxT, ok := t.(*tmux.Tmux); ok {
+			_ = TrackSessionPID(cfg.TownRoot, cfg.SessionID, tmuxT)
+		}
 	}
 
 	return &StartResult{RuntimeConfig: runtimeConfig}, nil
 }
 
-// StopSession stops a tmux session with optional graceful shutdown.
+// StopSession stops a session with optional graceful shutdown.
 //
 // If graceful is true, sends Ctrl-C first and waits for the session to exit
 // before force-killing. This allows the agent to clean up.
-func StopSession(t *tmux.Tmux, sessionID string, graceful bool) error {
+func StopSession(t SessionBackend, sessionID string, graceful bool) error {
 	running, err := t.HasSession(sessionID)
 	if err != nil {
 		return fmt.Errorf("checking session: %w", err)
@@ -278,8 +296,19 @@ func StopSession(t *tmux.Tmux, sessionID string, graceful bool) error {
 	}
 
 	if graceful {
-		_ = t.SendKeysRaw(sessionID, "C-c")
-		WaitForSessionExit(t, sessionID, constants.GracefulShutdownTimeout)
+		_ = t.SendKeys(sessionID, "\x03") // Ctrl-C
+		if tmuxT, ok := t.(*tmux.Tmux); ok {
+			WaitForSessionExit(tmuxT, sessionID, constants.GracefulShutdownTimeout)
+		} else {
+			// Non-tmux: poll until session exits or timeout.
+			deadline := time.Now().Add(constants.GracefulShutdownTimeout)
+			for time.Now().Before(deadline) {
+				if alive, _ := t.HasSession(sessionID); !alive {
+					return nil
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+		}
 	}
 
 	if err := t.KillSessionWithProcesses(sessionID); err != nil {
@@ -341,10 +370,10 @@ func mergeRuntimeLivenessEnv(envVars map[string]string, runtimeConfig *config.Ru
 // KillExistingSession kills an existing session if one is found.
 // Returns true if a session was killed.
 //
-// If checkAlive is true, only kills zombie sessions (tmux alive but agent dead).
+// If checkAlive is true, only kills zombie sessions (session alive but agent dead).
 // If the session exists and the agent is alive, returns ErrAlreadyRunning.
 // If checkAlive is false, kills any existing session unconditionally.
-func KillExistingSession(t *tmux.Tmux, sessionID string, checkAlive bool) (bool, error) {
+func KillExistingSession(t SessionBackend, sessionID string, checkAlive bool) (bool, error) {
 	running, err := t.HasSession(sessionID)
 	if err != nil {
 		return false, fmt.Errorf("checking session: %w", err)

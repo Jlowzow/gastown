@@ -1,15 +1,16 @@
 package session
 
 import (
+	"os"
+	"strings"
+	"time"
+
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // SessionBackend abstracts session management operations, enabling different
 // backend implementations (tmux, amux) to be swapped via configuration
 // without modifying call sites.
-//
-// Phase 1: interface definition only. Call sites continue using *tmux.Tmux
-// directly. Phase 2 (gt-8g9) migrates call sites to use this interface.
 type SessionBackend interface {
 	// Session lifecycle
 	NewSession(name, workDir string) error
@@ -36,4 +37,23 @@ type SessionBackend interface {
 	IsAgentRunning(session string, expectedPaneCommands ...string) bool
 	IsAgentAlive(session string) bool
 	IsAvailable() bool
+}
+
+// TmuxExtras is an optional interface for tmux-specific features that
+// don't apply to all backends. Use type assertions to check availability.
+type TmuxExtras interface {
+	SetRemainOnExit(session string, on bool) error
+	ConfigureGasTownSession(session string, theme tmux.Theme, rigName, agentName, role string) error
+	WaitForCommand(session string, cmds []string, timeout time.Duration) error
+	SetAutoRespawnHook(session string) error
+	AcceptBypassPermissionsWarning(session string) error
+}
+
+// BackendName returns "amux" or "tmux" based on the GT_SESSION_BACKEND env var.
+func BackendName() string {
+	backend := strings.ToLower(os.Getenv("GT_SESSION_BACKEND"))
+	if backend == "amux" {
+		return "amux"
+	}
+	return "tmux"
 }
