@@ -254,8 +254,10 @@ func StartSession(t SessionBackend, cfg SessionConfig) (_ *StartResult, retErr e
 	// Uses prompt-based polling for agents with ReadyPromptPrefix,
 	// falling back to ReadyDelayMs sleep for agents without prompt detection.
 	if cfg.ReadyDelay {
-		if err := t.WaitForRuntimeReady(cfg.SessionID, runtimeConfig, constants.ClaudeStartTimeout); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: agent readiness detection timed out for %s: %v\n", cfg.SessionID, err)
+		if tmuxT, ok := t.(*tmux.Tmux); ok {
+			if err := tmuxT.WaitForRuntimeReady(cfg.SessionID, runtimeConfig, constants.ClaudeStartTimeout); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: agent readiness detection timed out for %s: %v\n", cfg.SessionID, err)
+			}
 		}
 	}
 

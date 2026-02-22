@@ -403,7 +403,9 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// Wait for runtime to be fully ready at the prompt (not just started).
 	// Uses prompt-based polling for agents with ReadyPromptPrefix (e.g., Claude "❯ "),
 	// falling back to ReadyDelayMs sleep for agents without prompt detection.
-	debugSession("WaitForRuntimeReady", m.tmux.WaitForRuntimeReady(sessionID, runtimeConfig, constants.ClaudeStartTimeout))
+	if tmuxT, ok := m.backend.(*tmux.Tmux); ok {
+		debugSession("WaitForRuntimeReady", tmuxT.WaitForRuntimeReady(sessionID, runtimeConfig, constants.ClaudeStartTimeout))
+	}
 
 	// Handle fallback nudges for non-hook agents.
 	// See StartupFallbackInfo in runtime package for the fallback matrix.
@@ -421,7 +423,9 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 			// Wait for agent to finish processing beacon + gt prime before sending work instructions.
 			// Uses prompt-based detection where available; falls back to max(ReadyDelayMs, StartupNudgeDelayMs).
 			primeWaitRC := runtime.RuntimeConfigWithMinDelay(runtimeConfig, fallbackInfo.StartupNudgeDelayMs)
-			debugSession("WaitForPrimeReady", m.tmux.WaitForRuntimeReady(sessionID, primeWaitRC, constants.ClaudeStartTimeout))
+			if tmuxT, ok := m.backend.(*tmux.Tmux); ok {
+			debugSession("WaitForPrimeReady", tmuxT.WaitForRuntimeReady(sessionID, primeWaitRC, constants.ClaudeStartTimeout))
+		}
 		}
 
 		if fallbackInfo.SendStartupNudge {
