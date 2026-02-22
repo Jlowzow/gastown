@@ -195,15 +195,17 @@ func runStart(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  %s Could not ensure daemon config: %v\n", style.Dim.Render("○"), err)
 	}
 
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 
-	// Clean up orphaned tmux sessions before starting new agents.
+	// Clean up orphaned sessions before starting new agents.
 	// This prevents session name conflicts and resource accumulation from
-	// zombie sessions (tmux alive but Claude dead).
-	if cleaned, err := t.CleanupOrphanedSessions(session.IsKnownSession); err != nil {
-		fmt.Printf("  %s Could not clean orphaned sessions: %v\n", style.Dim.Render("○"), err)
-	} else if cleaned > 0 {
-		fmt.Printf("  %s Cleaned up %d orphaned session(s)\n", style.Bold.Render("✓"), cleaned)
+	// zombie sessions (session alive but Claude dead).
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		if cleaned, err := tmuxBackend.CleanupOrphanedSessions(session.IsKnownSession); err != nil {
+			fmt.Printf("  %s Could not clean orphaned sessions: %v\n", style.Dim.Render("○"), err)
+		} else if cleaned > 0 {
+			fmt.Printf("  %s Cleaned up %d orphaned session(s)\n", style.Bold.Render("✓"), cleaned)
+		}
 	}
 
 	fmt.Printf("Starting Gas Town from %s\n\n", style.Dim.Render(townRoot))
@@ -277,7 +279,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			startConfiguredCrew(t, rigs, townRoot, &mu)
+			startConfiguredCrew(backend, rigs, townRoot, &mu)
 		}()
 	}
 
@@ -422,7 +424,7 @@ func startRefineryForRig(r *rig.Rig) string {
 }
 
 // startConfiguredCrew starts crew members configured in rig settings in parallel.
-func startConfiguredCrew(t *tmux.Tmux, rigs []*rig.Rig, townRoot string, mu *sync.Mutex) {
+func startConfiguredCrew(backend session.SessionBackend, rigs []*rig.Rig, townRoot string, mu *sync.Mutex) {
 	var wg sync.WaitGroup
 	var startedAny int32 // Use atomic for thread-safe flag
 
@@ -432,7 +434,7 @@ func startConfiguredCrew(t *tmux.Tmux, rigs []*rig.Rig, townRoot string, mu *syn
 			wg.Add(1)
 			go func(r *rig.Rig, crewName string) {
 				defer wg.Done()
-				msg, started := startOrRestartCrewMember(t, r, crewName, townRoot)
+				msg, started := startOrRestartCrewMember(backend, r, crewName, townRoot)
 				mu.Lock()
 				fmt.Print(msg)
 				mu.Unlock()
@@ -456,13 +458,13 @@ func startConfiguredCrew(t *tmux.Tmux, rigs []*rig.Rig, townRoot string, mu *syn
 // Uses IsAgentAlive for robust zombie detection (checks pane command + descendant processes),
 // and delegates zombie cleanup to crewMgr.Start() which kills the zombie session and recreates
 // it with fresh env vars and runtime settings.
-func startOrRestartCrewMember(t *tmux.Tmux, r *rig.Rig, crewName, townRoot string) (msg string, started bool) {
+func startOrRestartCrewMember(backend session.SessionBackend, r *rig.Rig, crewName, townRoot string) (msg string, started bool) {
 	sessionID := crewSessionName(r.Name, crewName)
-	if running, _ := t.HasSession(sessionID); running {
+	if running, _ := backend.HasSession(sessionID); running {
 		// Session exists - check if agent is still alive
 		// Uses descendant process check instead of pane command check,
 		// since crew members launch via bash -c wrappers (see #1315, #1330).
-		if !t.IsAgentAlive(sessionID) {
+		if !backend.IsAgentAlive(sessionID) {
 			// Agent has exited, restart it
 			// Build startup beacon for predecessor discovery via /resume
 			address := session.BeaconRecipient("crew", crewName, r.Name)
@@ -472,7 +474,7 @@ func startOrRestartCrewMember(t *tmux.Tmux, r *rig.Rig, crewName, townRoot strin
 				Topic:     "restart",
 			})
 			agentCmd := config.BuildCrewStartupCommand(r.Name, crewName, r.Path, beacon)
-			if err := t.SendKeys(sessionID, agentCmd); err != nil {
+			if err := backend.SendKeys(sessionID, agentCmd); err != nil {
 				return fmt.Sprintf("  %s %s/%s restart failed: %v\n", style.Dim.Render("○"), r.Name, crewName, err), false
 			}
 			return fmt.Sprintf("  %s %s/%s agent restarted\n", style.Bold.Render("✓"), r.Name, crewName), true
@@ -502,13 +504,13 @@ func discoverAllRigs(townRoot string) ([]*rig.Rig, error) {
 }
 
 func runShutdown(cmd *cobra.Command, args []string) error {
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 
 	// Find workspace root for polecat cleanup
 	townRoot, _ := workspace.FindFromCwd()
 
 	// Collect sessions to show what will be stopped
-	sessions, err := t.ListSessions()
+	sessions, err := backend.ListSessions()
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
@@ -555,9 +557,9 @@ func runShutdown(cmd *cobra.Command, args []string) error {
 	}
 
 	if shutdownGraceful {
-		return runGracefulShutdown(t, toStop, townRoot)
+		return runGracefulShutdown(backend, toStop, townRoot)
 	}
-	return runImmediateShutdown(t, toStop, townRoot)
+	return runImmediateShutdown(backend, toStop, townRoot)
 }
 
 // categorizeSessions splits sessions into those to stop and those to preserve.
@@ -603,14 +605,14 @@ func categorizeSessions(sessions []string) (toStop, preserved []string) {
 	return
 }
 
-func runGracefulShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) error {
+func runGracefulShutdown(backend session.SessionBackend, gtSessions []string, townRoot string) error {
 	fmt.Printf("Graceful shutdown of Gas Town (waiting up to %ds)...\n\n", shutdownWait)
 
 	// Phase 1: Send ESC to all agents to interrupt them
 	fmt.Printf("Phase 1: Sending ESC to %d agent(s)...\n", len(gtSessions))
 	for _, sess := range gtSessions {
 		fmt.Printf("  %s Interrupting %s\n", style.Bold.Render("→"), sess)
-		_ = t.SendKeysRaw(sess, "Escape") // best-effort interrupt
+		_ = backend.SendKeysRaw(sess, "Escape") // best-effort interrupt
 	}
 
 	// Phase 2: Send shutdown message asking agents to handoff
@@ -619,7 +621,7 @@ func runGracefulShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) err
 	for _, sess := range gtSessions {
 		// Small delay then send the message
 		time.Sleep(constants.ShutdownNotifyDelay)
-		_ = t.SendKeys(sess, shutdownMsg) // best-effort notification
+		_ = backend.SendKeys(sess, shutdownMsg) // best-effort notification
 	}
 
 	// Phase 3: Wait for agents to complete handoff
@@ -642,7 +644,7 @@ func runGracefulShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) err
 	fmt.Printf("\nPhase 4: Terminating sessions...\n")
 	mayorSession := getMayorSessionName()
 	deaconSession := getDeaconSessionName()
-	stopped := killSessionsInOrder(t, gtSessions, mayorSession, deaconSession)
+	stopped := killSessionsInOrder(backend, gtSessions, mayorSession, deaconSession)
 
 	// Phase 5: Always clean up orphaned Claude processes after killing sessions.
 	// Processes can survive session kills if they caught/ignored SIGHUP or called setsid().
@@ -676,12 +678,12 @@ func runGracefulShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) err
 	return nil
 }
 
-func runImmediateShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) error {
+func runImmediateShutdown(backend session.SessionBackend, gtSessions []string, townRoot string) error {
 	fmt.Println("Shutting down Gas Town...")
 
 	mayorSession := getMayorSessionName()
 	deaconSession := getDeaconSessionName()
-	stopped := killSessionsInOrder(t, gtSessions, mayorSession, deaconSession)
+	stopped := killSessionsInOrder(backend, gtSessions, mayorSession, deaconSession)
 
 	// Always clean up orphaned Claude processes after killing sessions.
 	// Processes can survive session kills if they caught/ignored SIGHUP or called setsid().
@@ -731,7 +733,7 @@ func runImmediateShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) er
 //
 // Returns the count of sessions that were successfully stopped (verified by checking
 // if the session no longer exists after the kill attempt).
-func killSessionsInOrder(t *tmux.Tmux, sessions []string, mayorSession, deaconSession string) int {
+func killSessionsInOrder(backend session.SessionBackend, sessions []string, mayorSession, deaconSession string) int {
 	stopped := 0
 	bootSession := session.BootSessionName()
 
@@ -769,18 +771,18 @@ func killSessionsInOrder(t *tmux.Tmux, sessions []string, mayorSession, deaconSe
 	// Helper to kill a session and verify it was stopped
 	killAndVerify := func(sess string) bool {
 		// Check if session exists before attempting to kill
-		exists, _ := t.HasSession(sess)
+		exists, _ := backend.HasSession(sess)
 		if !exists {
 			return false // Session already gone
 		}
 
 		// Attempt to kill the session and its processes
-		_ = t.KillSessionWithProcesses(sess)
+		_ = backend.KillSessionWithProcesses(sess)
 
 		// Verify the session is actually gone (ignore error, check existence)
 		// KillSessionWithProcesses might return an error even if it successfully
 		// killed the processes and the session auto-closed
-		stillExists, _ := t.HasSession(sess)
+		stillExists, _ := backend.HasSession(sess)
 		if !stillExists {
 			fmt.Printf("  %s %s stopped\n", style.Bold.Render("✓"), sess)
 			return true
@@ -856,7 +858,7 @@ func cleanupPolecats(townRoot string) {
 
 	for _, r := range rigs {
 		polecatGit := git.NewGit(r.Path)
-		polecatMgr := polecat.NewManager(r, polecatGit, nil) // nil tmux: just listing, not allocating
+		polecatMgr := polecat.NewManagerWithBackend(r, polecatGit, nil) // nil backend: just listing, not allocating
 
 		polecats, err := polecatMgr.List()
 		if err != nil {

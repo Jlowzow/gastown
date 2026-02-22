@@ -180,8 +180,12 @@ func resolveAgentDisplay(townSettings *config.TownSettings, role string, session
 // to determine what agent runtime and model are in use.
 func detectRuntimeFromSession(sessionName string) string {
 	// Get the PID of the shell process in the tmux pane
-	t := tmux.NewTmux()
-	pid, err := t.GetPanePID(sessionName)
+	backend := session.NewBackend()
+	tmuxBackend, ok := backend.(*tmux.Tmux)
+	if !ok {
+		return ""
+	}
+	pid, err := tmuxBackend.GetPanePID(sessionName)
 	if err != nil || pid == "" {
 		return ""
 	}
@@ -587,8 +591,8 @@ func gatherStatus() (TownStatus, error) {
 	g := git.NewGit(townRoot)
 	mgr := rig.NewManager(townRoot, rigsConfig, g)
 
-	// Create tmux instance for runtime checks
-	t := tmux.NewTmux()
+	// Create backend instance for runtime checks
+	backend := session.NewBackend()
 
 	// Pre-fetch all tmux sessions and verify agent liveness for O(1) lookup.
 	// A Gas Town session is only considered "running" if the agent process is
@@ -596,7 +600,7 @@ func gatherStatus() (TownStatus, error) {
 	// zombie sessions (tmux alive, agent dead) from showing as running.
 	// See: gt-bd6i3
 	allSessions := make(map[string]bool)
-	if sessions, err := t.ListSessions(); err == nil {
+	if sessions, err := backend.ListSessions(); err == nil {
 		var sessionMu sync.Mutex
 		var sessionWg sync.WaitGroup
 		for _, s := range sessions {
@@ -604,7 +608,7 @@ func gatherStatus() (TownStatus, error) {
 				sessionWg.Add(1)
 				go func(name string) {
 					defer sessionWg.Done()
-					alive := t.IsAgentAlive(name)
+					alive := backend.IsAgentAlive(name)
 					sessionMu.Lock()
 					allSessions[name] = alive
 					sessionMu.Unlock()

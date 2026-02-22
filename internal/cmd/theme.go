@@ -134,10 +134,10 @@ func runTheme(cmd *cobra.Command, args []string) error {
 }
 
 func runThemeApply(cmd *cobra.Command, args []string) error {
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 
 	// Get all sessions
-	sessions, err := t.ListSessions()
+	sessions, err := backend.ListSessions()
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
@@ -194,16 +194,21 @@ func runThemeApply(cmd *cobra.Command, args []string) error {
 			theme = getThemeForRole(rig, role)
 		}
 
-		// Apply theme and status format
-		if err := t.ApplyTheme(sess, theme); err != nil {
+		// Apply theme and status format (tmux-specific operations)
+		tmuxBackend, ok := backend.(*tmux.Tmux)
+		if !ok {
+			fmt.Printf("  %s: skipped (theme apply requires tmux backend)\n", sess)
+			continue
+		}
+		if err := tmuxBackend.ApplyTheme(sess, theme); err != nil {
 			fmt.Printf("  %s: failed (%v)\n", sess, err)
 			continue
 		}
-		if err := t.SetStatusFormat(sess, rig, worker, role); err != nil {
+		if err := tmuxBackend.SetStatusFormat(sess, rig, worker, role); err != nil {
 			fmt.Printf("  %s: failed to set format (%v)\n", sess, err)
 			continue
 		}
-		if err := t.SetDynamicStatus(sess); err != nil {
+		if err := tmuxBackend.SetDynamicStatus(sess); err != nil {
 			fmt.Printf("  %s: failed to set dynamic status (%v)\n", sess, err)
 			continue
 		}

@@ -12,7 +12,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -303,10 +302,10 @@ func runWarrantExecute(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	tm := tmux.NewTmux()
+	backend := session.NewBackend()
 
 	if warrant != nil {
-		if err := executeOneWarrant(warrant, warrantPath, tm); err != nil {
+		if err := executeOneWarrant(warrant, warrantPath, backend); err != nil {
 			return fmt.Errorf("executing warrant: %w", err)
 		}
 	} else {
@@ -315,10 +314,10 @@ func runWarrantExecute(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("determining session name: %w", err)
 		}
-		if has, err := tm.HasSession(sessionName); err != nil {
+		if has, err := backend.HasSession(sessionName); err != nil {
 			return fmt.Errorf("checking session %s: %w", sessionName, err)
 		} else if has {
-			if err := tm.KillSessionWithProcesses(sessionName); err != nil {
+			if err := backend.KillSessionWithProcesses(sessionName); err != nil {
 				return fmt.Errorf("killing session %s: %w", sessionName, err)
 			}
 			fmt.Printf("✓ Terminated session %s\n", sessionName)
@@ -335,19 +334,19 @@ func runWarrantExecute(cmd *cobra.Command, args []string) error {
 // session exists, kills it with full process tree cleanup, and marks the warrant
 // as executed on disk. Returns nil on success. On error, the warrant is NOT
 // marked as executed so it can be retried on the next triage cycle.
-func executeOneWarrant(w *Warrant, warrantPath string, tm *tmux.Tmux) error {
+func executeOneWarrant(w *Warrant, warrantPath string, backend session.SessionBackend) error {
 	sessionName, err := targetToSessionName(w.Target)
 	if err != nil {
 		return fmt.Errorf("invalid target %s: %w", w.Target, err)
 	}
 
-	has, err := tm.HasSession(sessionName)
+	has, err := backend.HasSession(sessionName)
 	if err != nil {
 		return fmt.Errorf("checking session %s: %w", sessionName, err)
 	}
 
 	if has {
-		if err := tm.KillSessionWithProcesses(sessionName); err != nil {
+		if err := backend.KillSessionWithProcesses(sessionName); err != nil {
 			return fmt.Errorf("killing session %s: %w", sessionName, err)
 		}
 		fmt.Printf("Warrant executed: terminated session %s (%s)\n", sessionName, w.Target)

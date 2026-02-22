@@ -158,7 +158,7 @@ func runMayorAttach(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("finding workspace: %w", err)
 	}
 
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 	sessionID := mgr.SessionName()
 
 	running, err := mgr.IsRunning()
@@ -176,11 +176,16 @@ func runMayorAttach(cmd *cobra.Command, args []string) error {
 		// If runtime exited or sitting at shell, restart with proper context.
 		// Use IsAgentAlive (checks descendant processes) instead of IsAgentRunning
 		// (pane command only), since mayor launches via bash wrapper.
-		if !t.IsAgentAlive(sessionID) {
+		if !backend.IsAgentAlive(sessionID) {
 			// Runtime has exited, restart it with proper context
 			fmt.Println("Runtime exited, restarting with context...")
 
-			paneID, err := t.GetPaneID(sessionID)
+			tmuxBackend, ok := backend.(*tmux.Tmux)
+			if !ok {
+				return fmt.Errorf("restart-on-attach requires tmux backend")
+			}
+
+			paneID, err := tmuxBackend.GetPaneID(sessionID)
 			if err != nil {
 				return fmt.Errorf("getting pane ID: %w", err)
 			}
@@ -200,19 +205,19 @@ func runMayorAttach(cmd *cobra.Command, args []string) error {
 
 			// Set remain-on-exit so the pane survives process death during respawn.
 			// Without this, killing processes causes tmux to destroy the pane.
-			if err := t.SetRemainOnExit(paneID, true); err != nil {
+			if err := tmuxBackend.SetRemainOnExit(paneID, true); err != nil {
 				style.PrintWarning("could not set remain-on-exit: %v", err)
 			}
 
 			// Kill all processes in the pane before respawning to prevent orphan leaks
 			// RespawnPane's -k flag only sends SIGHUP which Claude/Node may ignore
-			if err := t.KillPaneProcesses(paneID); err != nil {
+			if err := tmuxBackend.KillPaneProcesses(paneID); err != nil {
 				// Non-fatal but log the warning
 				style.PrintWarning("could not kill pane processes: %v", err)
 			}
 
 			// Note: respawn-pane automatically resets remain-on-exit to off
-			if err := t.RespawnPane(paneID, startupCmd); err != nil {
+			if err := tmuxBackend.RespawnPane(paneID, startupCmd); err != nil {
 				return fmt.Errorf("restarting runtime: %w", err)
 			}
 

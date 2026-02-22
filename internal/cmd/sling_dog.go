@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dog"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -166,8 +167,10 @@ func DispatchToDog(dogName string, opts DogDispatchOptions) (*DogDispatchInfo, e
 	}
 
 	// Ensure dog session is running (start if needed)
-	t := tmux.NewTmux()
-	sessMgr := dog.NewSessionManager(t, townRoot, mgr)
+	backend := session.NewBackend()
+	// dog.NewSessionManager requires *tmux.Tmux; type-assert from SessionBackend
+	tmuxBackend, _ := backend.(*tmux.Tmux)
+	sessMgr := dog.NewSessionManager(tmuxBackend, townRoot, mgr)
 
 	sessOpts := dog.SessionStartOptions{
 		WorkDesc:      opts.WorkDesc,
@@ -195,9 +198,11 @@ func (d *DogDispatchInfo) StartDelayedSession() (string, error) {
 		return d.Pane, nil // Session was already started
 	}
 
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 	mgr := dog.NewManager(d.townRoot, d.rigsConfig)
-	sessMgr := dog.NewSessionManager(t, d.townRoot, mgr)
+	// dog.NewSessionManager requires *tmux.Tmux; type-assert from SessionBackend
+	tmuxBackend, _ := backend.(*tmux.Tmux)
+	sessMgr := dog.NewSessionManager(tmuxBackend, d.townRoot, mgr)
 
 	opts := dog.SessionStartOptions{
 		WorkDesc:      d.workDesc,

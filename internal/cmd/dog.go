@@ -14,8 +14,8 @@ import (
 	"github.com/steveyegge/gastown/internal/dog"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/plugin"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -569,8 +569,8 @@ func runDogClear(cmd *cobra.Command, args []string) error {
 	// Check for live tmux session
 	if !dogForce {
 		sessionName := fmt.Sprintf("hq-dog-%s", name)
-		tm := tmux.NewTmux()
-		if has, _ := tm.HasSession(sessionName); has {
+		backend := session.NewBackend()
+		if has, _ := backend.HasSession(sessionName); has {
 			return fmt.Errorf("dog %s has an active session (%s)\nUse --force to clear anyway", name, sessionName)
 		}
 	}
@@ -699,8 +699,8 @@ func showDogStatus(mgr *dog.Manager, name string) error {
 
 	// Check for tmux session
 	sessionName := fmt.Sprintf("hq-dog-%s", name)
-	tm := tmux.NewTmux()
-	if has, _ := tm.HasSession(sessionName); has {
+	backend := session.NewBackend()
+	if has, _ := backend.HasSession(sessionName); has {
 		fmt.Printf("\nSession: %s (running)\n", sessionName)
 	}
 

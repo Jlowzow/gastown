@@ -1460,10 +1460,12 @@ func selfKillSession(townRoot string, roleInfo RoleInfo) error {
 	// We use KillSessionWithProcessesExcluding to ensure no orphaned processes are left behind,
 	// while excluding our own PID to avoid killing ourselves before cleanup completes.
 	// The tmux kill-session at the end will terminate us along with the session.
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 	myPID := strconv.Itoa(os.Getpid())
-	if err := t.KillSessionWithProcessesExcluding(sessionName, []string{myPID}); err != nil {
-		return fmt.Errorf("killing session %s: %w", sessionName, err)
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		if err := tmuxBackend.KillSessionWithProcessesExcluding(sessionName, []string{myPID}); err != nil {
+			return fmt.Errorf("killing session %s: %w", sessionName, err)
+		}
 	}
 
 	return nil

@@ -17,9 +17,9 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/swarm"
-	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -496,10 +496,10 @@ func spawnSwarmWorkersFromBeads(r *rig.Rig, townRoot string, swarmID string, wor
 	ID    string `json:"id"`
 	Title string `json:"title"`
 }) error { //nolint:unparam // error return kept for future use
-	t := tmux.NewTmux()
-	polecatSessMgr := polecat.NewSessionManager(t, r)
+	backend := session.NewBackend()
+	polecatSessMgr := polecat.NewSessionManagerWithBackend(backend, r)
 	polecatGit := git.NewGit(r.Path)
-	polecatMgr := polecat.NewManager(r, polecatGit, t)
+	polecatMgr := polecat.NewManagerWithBackend(r, polecatGit, backend)
 
 	// Pair workers with tasks (round-robin if more tasks than workers)
 	workerIdx := 0

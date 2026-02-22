@@ -14,7 +14,6 @@ import (
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -178,8 +177,8 @@ func categorizeSession(name string) *AgentSession {
 
 // getAgentSessions returns all categorized Gas Town sessions.
 func getAgentSessions(includePolecats bool) ([]*AgentSession, error) {
-	t := tmux.NewTmux()
-	sessions, err := t.ListSessions()
+	backend := session.NewBackend()
+	sessions, err := backend.ListSessions()
 	if err != nil {
 		return nil, err
 	}
@@ -482,8 +481,8 @@ func buildCollisionReport(townRoot string) (*CollisionReport, error) {
 	}
 
 	// Get all tmux sessions
-	t := tmux.NewTmux()
-	sessions, err := t.ListSessions()
+	backend := session.NewBackend()
+	sessions, err := backend.ListSessions()
 	if err != nil {
 		sessions = []string{} // Continue even if tmux not running
 	}

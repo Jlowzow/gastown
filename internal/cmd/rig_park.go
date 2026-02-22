@@ -7,7 +7,6 @@ import (
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/wisp"
 	"github.com/steveyegge/gastown/internal/witness"
 )
@@ -93,11 +92,11 @@ func parkOneRig(rigName string) error {
 
 	var stoppedAgents []string
 
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 
 	// Stop witness if running
 	witnessSession := session.WitnessSessionName(session.PrefixFor(rigName))
-	witnessRunning, _ := t.HasSession(witnessSession)
+	witnessRunning, _ := backend.HasSession(witnessSession)
 	if witnessRunning {
 		fmt.Printf("  Stopping witness...\n")
 		witMgr := witness.NewManager(r)
@@ -110,7 +109,7 @@ func parkOneRig(rigName string) error {
 
 	// Stop refinery if running
 	refinerySession := session.RefinerySessionName(session.PrefixFor(rigName))
-	refineryRunning, _ := t.HasSession(refinerySession)
+	refineryRunning, _ := backend.HasSession(refinerySession)
 	if refineryRunning {
 		fmt.Printf("  Stopping refinery...\n")
 		refMgr := refinery.NewManager(r)

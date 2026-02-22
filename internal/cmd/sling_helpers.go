@@ -337,8 +337,11 @@ func injectStartPrompt(pane, beadID, subject, args string) error {
 	}
 
 	// Use the reliable nudge pattern (same as gt nudge / tmux.NudgeSession)
-	t := tmux.NewTmux()
-	return t.NudgePane(pane, prompt)
+	backend := session.NewBackend()
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		return tmuxBackend.NudgePane(pane, prompt)
+	}
+	return fmt.Errorf("NudgePane not supported by %T backend", backend)
 }
 
 // getSessionFromPane extracts session name from a pane target.
@@ -366,9 +369,9 @@ func getSessionFromPane(pane string) string {
 // Uses a pragmatic approach: wait for the pane to leave a shell, then (Claude-only)
 // accept the bypass permissions warning and give it a moment to finish initializing.
 func ensureAgentReady(sessionName string) error {
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 
-	if t.IsAgentRunning(sessionName) {
+	if backend.IsAgentRunning(sessionName) {
 		// Agent process is detected, but it may have just started (fresh spawn).
 		// Check session age — if < 15s old, the agent likely isn't ready for input yet.
 		if !isSessionYoung(sessionName, 15*time.Second) {
@@ -377,15 +380,19 @@ func ensureAgentReady(sessionName string) error {
 		// Fall through to apply startup delay for young sessions.
 	} else {
 		// Agent not running yet - wait for it to start (shell → program transition)
-		if err := t.WaitForCommand(sessionName, constants.SupportedShells, constants.ClaudeStartTimeout); err != nil {
-			return fmt.Errorf("waiting for agent to start: %w", err)
+		if tmuxExtras, ok := backend.(session.TmuxExtras); ok {
+			if err := tmuxExtras.WaitForCommand(sessionName, constants.SupportedShells, constants.ClaudeStartTimeout); err != nil {
+				return fmt.Errorf("waiting for agent to start: %w", err)
+			}
 		}
 	}
 
 	// Accept bypass permissions warning if the agent emits one on startup
-	agentName, _ := t.GetEnvironment(sessionName, "GT_AGENT")
+	agentName, _ := backend.GetEnvironment(sessionName, "GT_AGENT")
 	if shouldAcceptPermissionWarning(agentName) {
-		_ = t.AcceptBypassPermissionsWarning(sessionName)
+		if tmuxExtras, ok := backend.(session.TmuxExtras); ok {
+			_ = tmuxExtras.AcceptBypassPermissionsWarning(sessionName)
+		}
 	}
 
 	// Use prompt-detection polling instead of fixed sleep.
@@ -415,9 +422,11 @@ func ensureAgentReady(sessionName string) error {
 	if rc.Tmux != nil && rc.Tmux.ReadyPromptPrefix == "" && rc.Tmux.ReadyDelayMs < 1000 {
 		rc.Tmux.ReadyDelayMs = 1000
 	}
-	if err := t.WaitForRuntimeReady(sessionName, rc, constants.ClaudeStartTimeout); err != nil {
-		// Graceful degradation: warn but proceed (matches original behavior of always continuing)
-		fmt.Fprintf(os.Stderr, "Warning: agent readiness detection timed out for %s: %v\n", sessionName, err)
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		if err := tmuxBackend.WaitForRuntimeReady(sessionName, rc, constants.ClaudeStartTimeout); err != nil {
+			// Graceful degradation: warn but proceed (matches original behavior of always continuing)
+			fmt.Fprintf(os.Stderr, "Warning: agent readiness detection timed out for %s: %v\n", sessionName, err)
+		}
 	}
 
 	return nil
@@ -581,8 +590,8 @@ func wakeRigAgents(rigName string) {
 	// nudges would be stuck forever. Direct delivery is safe: if the
 	// agent is busy, text buffers in tmux and is processed at next prompt.
 	witnessSession := session.WitnessSessionName(session.PrefixFor(rigName))
-	t := tmux.NewTmux()
-	if err := t.NudgeSession(witnessSession, "Polecat dispatched - check for work"); err != nil {
+	backend := session.NewBackend()
+	if err := backend.NudgeSession(witnessSession, "Polecat dispatched - check for work"); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to nudge witness %s: %v\n", witnessSession, err)
 	}
 }
@@ -616,8 +625,8 @@ func nudgeRefinery(rigName, message string) {
 		})
 	}
 
-	t := tmux.NewTmux()
-	if err := t.NudgeSession(refinerySession, message); err != nil {
+	backend := session.NewBackend()
+	if err := backend.NudgeSession(refinerySession, message); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to nudge refinery %s: %v\n", refinerySession, err)
 	}
 }
@@ -736,8 +745,8 @@ func isHookedAgentDead(assignee string) bool {
 	if sessionName == "" {
 		return false // Unknown format, can't determine
 	}
-	t := tmux.NewTmux()
-	alive, err := t.HasSession(sessionName)
+	backend := session.NewBackend()
+	alive, err := backend.HasSession(sessionName)
 	if err != nil {
 		return false // tmux not available or error, be conservative
 	}

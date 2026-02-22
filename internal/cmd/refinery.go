@@ -13,7 +13,6 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -507,8 +506,8 @@ func runRefineryAttach(cmd *cobra.Command, args []string) error {
 	sessionID := session.RefinerySessionName(session.PrefixFor(rigName))
 
 	// Check if session exists
-	t := tmux.NewTmux()
-	running, err := t.HasSession(sessionID)
+	backend := session.NewBackend()
+	running, err := backend.HasSession(sessionID)
 	if err != nil {
 		return fmt.Errorf("checking session: %w", err)
 	}

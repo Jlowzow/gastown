@@ -33,10 +33,14 @@ func resolveTargetAgent(target string) (agentID string, pane string, hookRoot st
 	}
 
 	// Get the target's working directory for hook storage
-	t := tmux.NewTmux()
-	hookRoot, err = t.GetPaneWorkDir(sessionName)
-	if err != nil {
-		return "", "", "", fmt.Errorf("getting working dir for %s: %w", sessionName, err)
+	backend := session.NewBackend()
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		hookRoot, err = tmuxBackend.GetPaneWorkDir(sessionName)
+		if err != nil {
+			return "", "", "", fmt.Errorf("getting working dir for %s: %w", sessionName, err)
+		}
+	} else {
+		return "", "", "", fmt.Errorf("GetPaneWorkDir not supported by %T backend", backend)
 	}
 
 	return agentID, pane, hookRoot, nil

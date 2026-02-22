@@ -12,8 +12,9 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/quota"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
-	ttmux "github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -221,8 +222,8 @@ func runQuotaScan(cmd *cobra.Command, args []string) error {
 	// acctCfg can be nil if no accounts configured — scan still works
 
 	// Create scanner
-	t := ttmux.NewTmux()
-	scanner, err := quota.NewScanner(t, nil, acctCfg)
+	backend := session.NewBackend()
+	scanner, err := quota.NewScanner(backend, nil, acctCfg)
 	if err != nil {
 		return fmt.Errorf("creating scanner: %w", err)
 	}
@@ -356,8 +357,8 @@ func runQuotaRotate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create scanner and plan rotation
-	t := ttmux.NewTmux()
-	scanner, err := quota.NewScanner(t, nil, acctCfg)
+	backend := session.NewBackend()
+	scanner, err := quota.NewScanner(backend, nil, acctCfg)
 	if err != nil {
 		return fmt.Errorf("creating scanner: %w", err)
 	}
@@ -424,7 +425,11 @@ func runQuotaRotate(cmd *cobra.Command, args []string) error {
 	if !quotaJSON {
 		fmt.Println()
 	}
-	rotator := quota.NewRotator(t, t, mgr, acctCfg, buildRestartCommand, quotaLogger{},
+	// NewRotator's TmuxExecutor parameter requires tmux-specific methods
+	// (SetRemainOnExit, AcceptBypassPermissionsWarning). Type-assert to get
+	// the concrete *tmux.Tmux which satisfies both TmuxClient and TmuxExecutor.
+	tmuxBackend, _ := backend.(*tmux.Tmux)
+	rotator := quota.NewRotator(backend, tmuxBackend, mgr, acctCfg, buildRestartCommand, quotaLogger{},
 		townRoot, "" /* agentName: default "claude" */, symlinkSessionToConfigDir)
 	results := rotator.Execute(plan, sortedSessions)
 

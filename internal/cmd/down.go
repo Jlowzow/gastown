@@ -91,9 +91,9 @@ func runDown(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	t := tmux.NewTmux()
-	if !t.IsAvailable() {
-		return fmt.Errorf("tmux not available (is tmux installed and on PATH?)")
+	backend := session.NewBackend()
+	if !backend.IsAvailable() {
+		return fmt.Errorf("session backend not available")
 	}
 
 	// Phase 0: Acquire shutdown lock (skip for dry-run)
@@ -115,7 +115,9 @@ func runDown(cmd *cobra.Command, args []string) error {
 		// By default, tmux exits when there are no sessions (exit-empty on).
 		// This ensures the server stays running for subsequent `gt up`.
 		// Ignore errors - if there's no server, nothing to configure.
-		_ = t.SetExitEmpty(false)
+		if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+			_ = tmuxBackend.SetExitEmpty(false)
+		}
 	}
 	allOK := true
 
@@ -133,7 +135,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Println("Stopping polecats...")
 		}
-		polecatsStopped := stopAllPolecats(t, townRoot, rigs, downForce, downDryRun)
+		polecatsStopped := stopAllPolecats(backend, townRoot, rigs, downForce, downDryRun)
 		if downDryRun {
 			if polecatsStopped > 0 {
 				printDownStatus("Polecats", true, fmt.Sprintf("%d would stop", polecatsStopped))
@@ -154,12 +156,12 @@ func runDown(cmd *cobra.Command, args []string) error {
 	for _, rigName := range rigs {
 		sessionName := session.RefinerySessionName(session.PrefixFor(rigName))
 		if downDryRun {
-			if running, _ := t.HasSession(sessionName); running {
+			if running, _ := backend.HasSession(sessionName); running {
 				printDownStatus(fmt.Sprintf("Refinery (%s)", rigName), true, "would stop")
 			}
 			continue
 		}
-		wasRunning, err := stopSession(t, sessionName)
+		wasRunning, err := stopSession(backend, sessionName)
 		if err != nil {
 			printDownStatus(fmt.Sprintf("Refinery (%s)", rigName), false, err.Error())
 			allOK = false
@@ -174,12 +176,12 @@ func runDown(cmd *cobra.Command, args []string) error {
 	for _, rigName := range rigs {
 		sessionName := session.WitnessSessionName(session.PrefixFor(rigName))
 		if downDryRun {
-			if running, _ := t.HasSession(sessionName); running {
+			if running, _ := backend.HasSession(sessionName); running {
 				printDownStatus(fmt.Sprintf("Witness (%s)", rigName), true, "would stop")
 			}
 			continue
 		}
-		wasRunning, err := stopSession(t, sessionName)
+		wasRunning, err := stopSession(backend, sessionName)
 		if err != nil {
 			printDownStatus(fmt.Sprintf("Witness (%s)", rigName), false, err.Error())
 			allOK = false
@@ -193,19 +195,21 @@ func runDown(cmd *cobra.Command, args []string) error {
 	// Phase 3: Stop town-level sessions (Mayor, Boot, Deacon)
 	for _, ts := range session.TownSessions() {
 		if downDryRun {
-			if running, _ := t.HasSession(ts.SessionID); running {
+			if running, _ := backend.HasSession(ts.SessionID); running {
 				printDownStatus(ts.Name, true, "would stop")
 			}
 			continue
 		}
-		stopped, err := session.StopTownSession(t, ts, downForce)
-		if err != nil {
-			printDownStatus(ts.Name, false, err.Error())
-			allOK = false
-		} else if stopped {
-			printDownStatus(ts.Name, true, "stopped")
-		} else {
-			printDownStatus(ts.Name, true, "not running")
+		if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+			stopped, err := session.StopTownSession(tmuxBackend, ts, downForce)
+			if err != nil {
+				printDownStatus(ts.Name, false, err.Error())
+				allOK = false
+			} else if stopped {
+				printDownStatus(ts.Name, true, "stopped")
+			} else {
+				printDownStatus(ts.Name, true, "not running")
+			}
 		}
 	}
 
@@ -274,7 +278,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 		cleanupOrphanedClaude(defaultDownOrphanGraceSecs)
 
 		time.Sleep(500 * time.Millisecond)
-		respawned := verifyShutdown(t, townRoot)
+		respawned := verifyShutdown(backend, townRoot)
 		if len(respawned) > 0 {
 			fmt.Println()
 			fmt.Printf("%s Warning: Some processes may have respawned:\n", style.Bold.Render("⚠"))
@@ -304,11 +308,13 @@ func runDown(cmd *cobra.Command, args []string) error {
 			fmt.Printf("To proceed, run with: %s\n", style.Bold.Render("GT_NUKE_ACKNOWLEDGED=1 gt down --nuke"))
 			allOK = false
 		} else {
-			if err := t.KillServer(); err != nil {
-				printDownStatus("Tmux server", false, err.Error())
-				allOK = false
-			} else {
-				printDownStatus("Tmux server", true, "killed (all tmux sessions destroyed)")
+			if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+				if err := tmuxBackend.KillServer(); err != nil {
+					printDownStatus("Tmux server", false, err.Error())
+					allOK = false
+				} else {
+					printDownStatus("Tmux server", true, "killed (all tmux sessions destroyed)")
+				}
 			}
 		}
 	}
@@ -347,7 +353,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 
 // stopAllPolecats stops all polecat sessions across all rigs.
 // Returns the number of polecats stopped (or would be stopped in dry-run).
-func stopAllPolecats(t *tmux.Tmux, townRoot string, rigNames []string, force bool, dryRun bool) int {
+func stopAllPolecats(backend session.SessionBackend, townRoot string, rigNames []string, force bool, dryRun bool) int {
 	stopped := 0
 
 	// Load rigs config
@@ -366,7 +372,7 @@ func stopAllPolecats(t *tmux.Tmux, townRoot string, rigNames []string, force boo
 			continue
 		}
 
-		polecatMgr := polecat.NewSessionManager(t, r)
+		polecatMgr := polecat.NewSessionManagerWithBackend(backend, r)
 		infos, err := polecatMgr.ListPolecats()
 		if err != nil {
 			continue
@@ -402,10 +408,10 @@ func printDownStatus(name string, ok bool, detail string) {
 	}
 }
 
-// stopSession gracefully stops a tmux session.
+// stopSession gracefully stops a session.
 // Returns (wasRunning, error) - wasRunning is true if session existed and was stopped.
-func stopSession(t *tmux.Tmux, sessionName string) (bool, error) {
-	running, err := t.HasSession(sessionName)
+func stopSession(backend session.SessionBackend, sessionName string) (bool, error) {
+	running, err := backend.HasSession(sessionName)
 	if err != nil {
 		return false, err
 	}
@@ -415,14 +421,16 @@ func stopSession(t *tmux.Tmux, sessionName string) (bool, error) {
 
 	// Try graceful shutdown first (Ctrl-C, best-effort interrupt)
 	if !downForce {
-		_ = t.SendKeysRaw(sessionName, "C-c")
-		if session.WaitForSessionExit(t, sessionName, constants.GracefulShutdownTimeout) {
-			return true, nil // Process exited gracefully
+		_ = backend.SendKeysRaw(sessionName, "C-c")
+		if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+			if session.WaitForSessionExit(tmuxBackend, sessionName, constants.GracefulShutdownTimeout) {
+				return true, nil // Process exited gracefully
+			}
 		}
 	}
 
 	// Kill the session (with explicit process termination to prevent orphans)
-	return true, t.KillSessionWithProcesses(sessionName)
+	return true, backend.KillSessionWithProcesses(sessionName)
 }
 
 // acquireShutdownLock prevents concurrent shutdowns.
@@ -453,10 +461,10 @@ func acquireShutdownLock(townRoot string) (*flock.Flock, error) {
 
 // verifyShutdown checks for respawned processes after shutdown.
 // Returns list of things that are still running or respawned.
-func verifyShutdown(t *tmux.Tmux, townRoot string) []string {
+func verifyShutdown(backend session.SessionBackend, townRoot string) []string {
 	var respawned []string
 
-	sessions, err := t.ListSessions()
+	sessions, err := backend.ListSessions()
 	if err == nil {
 		for _, sess := range sessions {
 			if session.IsKnownSession(sess) {

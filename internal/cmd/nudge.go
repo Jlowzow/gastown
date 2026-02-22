@@ -125,7 +125,7 @@ var waitIdleTimeout = 15 * time.Second
 // For "immediate" mode: sends directly via tmux (current behavior).
 // For "queue" mode: writes to the nudge queue for cooperative delivery.
 // For "wait-idle" mode: waits for idle, then delivers or falls back to queue.
-func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
+func deliverNudge(backend session.SessionBackend, sessionName, message, sender string) error {
 	townRoot, _ := workspace.FindFromCwd()
 
 	// For direct tmux delivery, prefix with sender attribution.
@@ -150,18 +150,20 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 			// rather than silently degrading to immediate (destructive) delivery.
 			return fmt.Errorf("--mode=wait-idle requires a Gas Town workspace")
 		}
-		// Try to wait for idle
-		err := t.WaitForIdle(sessionName, waitIdleTimeout)
-		if err == nil {
-			// Agent is idle — safe to deliver directly
-			return t.NudgeSession(sessionName, prefixedMessage)
+		// Try to wait for idle (tmux-specific; other backends fall through to queue)
+		if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+			err := tmuxBackend.WaitForIdle(sessionName, waitIdleTimeout)
+			if err == nil {
+				// Agent is idle — safe to deliver directly
+				return backend.NudgeSession(sessionName, prefixedMessage)
+			}
+			// Terminal errors (session gone, no server) — propagate, don't queue.
+			// Queueing a nudge for a dead session means it will never be delivered.
+			if errors.Is(err, tmux.ErrSessionNotFound) || errors.Is(err, tmux.ErrNoServer) {
+				return fmt.Errorf("wait-idle: %w", err)
+			}
 		}
-		// Terminal errors (session gone, no server) — propagate, don't queue.
-		// Queueing a nudge for a dead session means it will never be delivered.
-		if errors.Is(err, tmux.ErrSessionNotFound) || errors.Is(err, tmux.ErrNoServer) {
-			return fmt.Errorf("wait-idle: %w", err)
-		}
-		// Timeout (agent busy) — queue instead
+		// Timeout (agent busy) or non-tmux backend — queue instead
 		if qErr := nudge.Enqueue(townRoot, sessionName, nudge.QueuedNudge{
 			Sender:   sender,
 			Message:  message,
@@ -170,12 +172,12 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 			// Queue failed — fall back to immediate as last resort.
 			// Better to interrupt than lose the message entirely.
 			fmt.Fprintf(os.Stderr, "Warning: queue fallback failed (%v), delivering immediately\n", qErr)
-			return t.NudgeSession(sessionName, prefixedMessage)
+			return backend.NudgeSession(sessionName, prefixedMessage)
 		}
 		return nil
 
 	default: // NudgeModeImmediate
-		return t.NudgeSession(sessionName, prefixedMessage)
+		return backend.NudgeSession(sessionName, prefixedMessage)
 	}
 }
 
@@ -213,13 +215,15 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 	if nudgeIfFreshFlag {
 		sessionName := tmux.CurrentSessionName()
 		if sessionName != "" {
-			t := tmux.NewTmux()
-			created, err := t.GetSessionCreatedUnix(sessionName)
-			if err == nil && created > 0 {
-				age := time.Since(time.Unix(created, 0))
-				if age > ifFreshMaxAge {
-					// Session is old — this is a compaction/clear, not a new session
-					return nil
+			backend := session.NewBackend()
+			if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+				created, err := tmuxBackend.GetSessionCreatedUnix(sessionName)
+				if err == nil && created > 0 {
+					age := time.Since(time.Unix(created, 0))
+					if age > ifFreshMaxAge {
+						// Session is old — this is a compaction/clear, not a new session
+						return nil
+					}
 				}
 			}
 		}
@@ -287,7 +291,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 
 	// Expand role shortcuts to session names
 	// These shortcuts let users type "mayor" instead of "gt-mayor"
@@ -315,7 +319,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 	if target == "deacon" {
 		deaconSession := session.DeaconSessionName()
 		// Check if Deacon session exists
-		exists, err := t.HasSession(deaconSession)
+		exists, err := backend.HasSession(deaconSession)
 		if err != nil {
 			return fmt.Errorf("checking deacon session: %w", err)
 		}
@@ -325,7 +329,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 			return nil
 		}
 
-		if err := deliverNudge(t, deaconSession, message, sender); err != nil {
+		if err := deliverNudge(backend, deaconSession, message, sender); err != nil {
 			return fmt.Errorf("nudging deacon: %w", err)
 		}
 
@@ -368,7 +372,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 			// Try crew first (matches mail system's addressToSessionIDs pattern),
 			// then fall back to polecat.
 			crewSession := crewSessionName(rigName, polecatName)
-			if exists, _ := t.HasSession(crewSession); exists {
+			if exists, _ := backend.HasSession(crewSession); exists {
 				sessionName = crewSession
 			} else {
 				mgr, _, err := getSessionManager(rigName)
@@ -383,7 +387,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		// Without this, queue mode silently succeeds for nonexistent sessions —
 		// the file is written but never drained.
 		if nudgeModeFlag != NudgeModeImmediate {
-			exists, err := t.HasSession(sessionName)
+			exists, err := backend.HasSession(sessionName)
 			if err != nil {
 				return fmt.Errorf("checking session: %w", err)
 			}
@@ -393,7 +397,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		}
 
 		// Send nudge using the configured delivery mode
-		if err := deliverNudge(t, sessionName, message, sender); err != nil {
+		if err := deliverNudge(backend, sessionName, message, sender); err != nil {
 			return fmt.Errorf("nudging session: %w", err)
 		}
 
@@ -406,7 +410,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload(rigName, target, message))
 	} else {
 		// Raw session name (legacy)
-		exists, err := t.HasSession(target)
+		exists, err := backend.HasSession(target)
 		if err != nil {
 			return fmt.Errorf("checking session: %w", err)
 		}
@@ -414,7 +418,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 			return fmt.Errorf("session %q not found", target)
 		}
 
-		if err := deliverNudge(t, target, message, sender); err != nil {
+		if err := deliverNudge(backend, target, message, sender); err != nil {
 			return fmt.Errorf("nudging session: %w", err)
 		}
 
@@ -482,7 +486,7 @@ func runNudgeChannel(channelName, message, sender string) error {
 	}
 
 	// Send nudges via deliverNudge (respects --mode flag)
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 	var succeeded, failed, skipped int
 	var failures []string
 
@@ -500,7 +504,7 @@ func runNudgeChannel(channelName, message, sender string) error {
 			}
 		}
 
-		if err := deliverNudge(t, sessionName, message, sender); err != nil {
+		if err := deliverNudge(backend, sessionName, message, sender); err != nil {
 			failed++
 			failures = append(failures, fmt.Sprintf("%s: %v", sessionName, err))
 			fmt.Printf("  %s %s\n", style.ErrorPrefix, sessionName)

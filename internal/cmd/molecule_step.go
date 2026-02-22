@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -323,21 +324,28 @@ func handleStepContinue(cwd, townRoot string, nextStep *beads.Issue, dryRun bool
 
 	fmt.Printf("\n%s Respawning for next step...\n", style.Bold.Render("🔄"))
 
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 
 	// Kill all processes in the pane before respawning to prevent process leaks
-	if err := t.KillPaneProcesses(pane); err != nil {
-		// Non-fatal but log the warning
-		style.PrintWarning("could not kill pane processes: %v", err)
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		if err := tmuxBackend.KillPaneProcesses(pane); err != nil {
+			// Non-fatal but log the warning
+			style.PrintWarning("could not kill pane processes: %v", err)
+		}
 	}
 
 	// Clear history before respawn
-	if err := t.ClearHistory(pane); err != nil {
-		// Non-fatal
-		style.PrintWarning("could not clear history: %v", err)
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		if err := tmuxBackend.ClearHistory(pane); err != nil {
+			// Non-fatal
+			style.PrintWarning("could not clear history: %v", err)
+		}
 	}
 
-	return t.RespawnPane(pane, restartCmd)
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		return tmuxBackend.RespawnPane(pane, restartCmd)
+	}
+	return fmt.Errorf("respawn not supported: backend is not tmux")
 }
 
 // handleParallelSteps handles executing multiple steps concurrently (fan-out pattern).

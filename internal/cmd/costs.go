@@ -19,7 +19,6 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -248,10 +247,10 @@ func runCosts(cmd *cobra.Command, args []string) error {
 }
 
 func runLiveCosts() error {
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 
 	// Get all tmux sessions
-	sessions, err := t.ListSessions()
+	sessions, err := backend.ListSessions()
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
@@ -288,7 +287,7 @@ func runLiveCosts() error {
 		}
 
 		// Check if an agent appears to be running
-		running := t.IsAgentRunning(sess)
+		running := backend.IsAgentRunning(sess)
 
 		costs = append(costs, SessionCost{
 			Session: sess,

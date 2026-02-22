@@ -14,7 +14,6 @@ import (
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/witness"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -121,11 +120,11 @@ func runRigDock(cmd *cobra.Command, args []string) error {
 
 	var stoppedAgents []string
 
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 
 	// Stop witness if running
 	witnessSession := session.WitnessSessionName(session.PrefixFor(rigName))
-	witnessRunning, _ := t.HasSession(witnessSession)
+	witnessRunning, _ := backend.HasSession(witnessSession)
 	if witnessRunning {
 		fmt.Printf("  Stopping witness...\n")
 		witMgr := witness.NewManager(r)
@@ -138,7 +137,7 @@ func runRigDock(cmd *cobra.Command, args []string) error {
 
 	// Stop refinery if running
 	refinerySession := session.RefinerySessionName(session.PrefixFor(rigName))
-	refineryRunning, _ := t.HasSession(refinerySession)
+	refineryRunning, _ := backend.HasSession(refinerySession)
 	if refineryRunning {
 		fmt.Printf("  Stopping refinery...\n")
 		refMgr := refinery.NewManager(r)
@@ -150,7 +149,7 @@ func runRigDock(cmd *cobra.Command, args []string) error {
 	}
 
 	// Stop polecat sessions if any
-	polecatMgr := polecat.NewSessionManager(t, r)
+	polecatMgr := polecat.NewSessionManagerWithBackend(backend, r)
 	polecatInfos, err := polecatMgr.List()
 	if err == nil && len(polecatInfos) > 0 {
 		fmt.Printf("  Stopping %d polecat session(s)...\n", len(polecatInfos))

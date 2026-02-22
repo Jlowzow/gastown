@@ -38,18 +38,18 @@ func init() {
 }
 
 func runStatusLine(cmd *cobra.Command, args []string) error {
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 
 	// Get session environment
 	var rigName, polecat, crew, issue, role string
 
 	if statusLineSession != "" {
 		// Non-fatal: missing env vars are handled gracefully below
-		rigName, _ = t.GetEnvironment(statusLineSession, "GT_RIG")
-		polecat, _ = t.GetEnvironment(statusLineSession, "GT_POLECAT")
-		crew, _ = t.GetEnvironment(statusLineSession, "GT_CREW")
-		issue, _ = t.GetEnvironment(statusLineSession, "GT_ISSUE")
-		role, _ = t.GetEnvironment(statusLineSession, "GT_ROLE")
+		rigName, _ = backend.GetEnvironment(statusLineSession, "GT_RIG")
+		polecat, _ = backend.GetEnvironment(statusLineSession, "GT_POLECAT")
+		crew, _ = backend.GetEnvironment(statusLineSession, "GT_CREW")
+		issue, _ = backend.GetEnvironment(statusLineSession, "GT_ISSUE")
+		role, _ = backend.GetEnvironment(statusLineSession, "GT_ROLE")
 	} else {
 		// Fallback to process environment
 		rigName = os.Getenv("GT_RIG")
@@ -65,30 +65,30 @@ func runStatusLine(cmd *cobra.Command, args []string) error {
 
 	// Determine identity and output based on role
 	if role == "mayor" || statusLineSession == mayorSession {
-		return runMayorStatusLine(t)
+		return runMayorStatusLine(backend)
 	}
 
 	// Deacon status line
 	if role == "deacon" || statusLineSession == deaconSession {
-		return runDeaconStatusLine(t)
+		return runDeaconStatusLine(backend)
 	}
 
 	// Witness status line (session naming: gt-<rig>-witness)
 	if role == "witness" || strings.HasSuffix(statusLineSession, "-witness") {
-		return runWitnessStatusLine(t, rigName)
+		return runWitnessStatusLine(backend, rigName)
 	}
 
 	// Refinery status line
 	if role == "refinery" || strings.HasSuffix(statusLineSession, "-refinery") {
-		return runRefineryStatusLine(t, rigName)
+		return runRefineryStatusLine(backend, rigName)
 	}
 
 	// Crew/Polecat status line
-	return runWorkerStatusLine(t, statusLineSession, rigName, polecat, crew, issue)
+	return runWorkerStatusLine(backend, statusLineSession, rigName, polecat, crew, issue)
 }
 
 // runWorkerStatusLine outputs status for crew or polecat sessions.
-func runWorkerStatusLine(t *tmux.Tmux, session, rigName, polecat, crew, issue string) error {
+func runWorkerStatusLine(backend session.SessionBackend, sess, rigName, polecat, crew, issue string) error {
 	// Determine agent type and identity
 	var icon, identity string
 	if polecat != "" {
@@ -101,10 +101,12 @@ func runWorkerStatusLine(t *tmux.Tmux, session, rigName, polecat, crew, issue st
 
 	// Get pane's working directory to find workspace
 	var townRoot string
-	if session != "" {
-		paneDir, err := t.GetPaneWorkDir(session)
-		if err == nil && paneDir != "" {
-			townRoot, _ = workspace.Find(paneDir)
+	if sess != "" {
+		if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+			paneDir, err := tmuxBackend.GetPaneWorkDir(sess)
+			if err == nil && paneDir != "" {
+				townRoot, _ = workspace.Find(paneDir)
+			}
 		}
 	}
 
@@ -120,8 +122,8 @@ func runWorkerStatusLine(t *tmux.Tmux, session, rigName, polecat, crew, issue st
 
 	// Priority 2: Fall back to GT_ISSUE env var or in_progress beads
 	currentWork := issue
-	if currentWork == "" && hookedWork == "" && session != "" {
-		currentWork = getCurrentWork(t, session, 40)
+	if currentWork == "" && hookedWork == "" && sess != "" {
+		currentWork = getCurrentWork(backend, sess, 40)
 	}
 
 	// Show hooked work (takes precedence)
@@ -162,9 +164,9 @@ func runWorkerStatusLine(t *tmux.Tmux, session, rigName, polecat, crew, issue st
 	return nil
 }
 
-func runMayorStatusLine(t *tmux.Tmux) error {
+func runMayorStatusLine(backend session.SessionBackend) error {
 	// Count active sessions by listing tmux sessions
-	sessions, err := t.ListSessions()
+	sessions, err := backend.ListSessions()
 	if err != nil {
 		return nil // Silent fail
 	}
@@ -172,9 +174,11 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 	// Get town root from mayor pane's working directory
 	var townRoot string
 	mayorSession := getMayorSessionName()
-	paneDir, err := t.GetPaneWorkDir(mayorSession)
-	if err == nil && paneDir != "" {
-		townRoot, _ = workspace.Find(paneDir)
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		paneDir, err := tmuxBackend.GetPaneWorkDir(mayorSession)
+		if err == nil && paneDir != "" {
+			townRoot, _ = workspace.Find(paneDir)
+		}
 	}
 
 	// Load registered rigs to validate against
@@ -239,7 +243,7 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 		if health := healthByType[agent.Type]; health != nil {
 			health.total++
 			// Detect working state via ✻ symbol
-			if isSessionWorking(t, s) {
+			if isSessionWorking(backend, s) {
 				health.working++
 			}
 		}
@@ -386,9 +390,9 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 
 // runDeaconStatusLine outputs status for the deacon session.
 // Shows: active rigs, polecat count, hook or mail preview
-func runDeaconStatusLine(t *tmux.Tmux) error {
+func runDeaconStatusLine(backend session.SessionBackend) error {
 	// Count active rigs and polecats
-	sessions, err := t.ListSessions()
+	sessions, err := backend.ListSessions()
 	if err != nil {
 		return nil // Silent fail
 	}
@@ -396,9 +400,11 @@ func runDeaconStatusLine(t *tmux.Tmux) error {
 	// Get town root from deacon pane's working directory
 	var townRoot string
 	deaconSession := getDeaconSessionName()
-	paneDir, err := t.GetPaneWorkDir(deaconSession)
-	if err == nil && paneDir != "" {
-		townRoot, _ = workspace.Find(paneDir)
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		paneDir, err := tmuxBackend.GetPaneWorkDir(deaconSession)
+		if err == nil && paneDir != "" {
+			townRoot, _ = workspace.Find(paneDir)
+		}
 	}
 
 	// Load registered rigs to validate against
@@ -456,7 +462,7 @@ func runDeaconStatusLine(t *tmux.Tmux) error {
 // runWitnessStatusLine outputs status for a witness session.
 // Shows: crew count, hook or mail preview
 // Note: Polecats excluded - their sessions are ephemeral and idle detection is a GC concern
-func runWitnessStatusLine(t *tmux.Tmux, rigName string) error {
+func runWitnessStatusLine(backend session.SessionBackend, rigName string) error {
 	if rigName == "" {
 		// Try to extract from session name: <prefix>-witness
 		if identity, err := session.ParseSessionName(statusLineSession); err == nil && identity.Role == session.RoleWitness {
@@ -467,13 +473,15 @@ func runWitnessStatusLine(t *tmux.Tmux, rigName string) error {
 	// Get town root from witness pane's working directory
 	var townRoot string
 	sessionName := session.WitnessSessionName(session.PrefixFor(rigName))
-	paneDir, err := t.GetPaneWorkDir(sessionName)
-	if err == nil && paneDir != "" {
-		townRoot, _ = workspace.Find(paneDir)
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		paneDir, err := tmuxBackend.GetPaneWorkDir(sessionName)
+		if err == nil && paneDir != "" {
+			townRoot, _ = workspace.Find(paneDir)
+		}
 	}
 
 	// Count crew in this rig (crew are persistent, worth tracking)
-	sessions, err := t.ListSessions()
+	sessions, err := backend.ListSessions()
 	if err != nil {
 		return nil // Silent fail
 	}
@@ -523,7 +531,7 @@ func runWitnessStatusLine(t *tmux.Tmux, rigName string) error {
 
 // runRefineryStatusLine outputs status for a refinery session.
 // Shows: MQ length, current item, hook or mail preview
-func runRefineryStatusLine(t *tmux.Tmux, rigName string) error {
+func runRefineryStatusLine(backend session.SessionBackend, rigName string) error {
 	if rigName == "" {
 		// Try to extract from session name: <prefix>-refinery
 		if identity, err := session.ParseSessionName(statusLineSession); err == nil && identity.Role == session.RoleRefinery {
@@ -539,9 +547,11 @@ func runRefineryStatusLine(t *tmux.Tmux, rigName string) error {
 	// Get town root from refinery pane's working directory
 	var townRoot string
 	sessionName := session.RefinerySessionName(session.PrefixFor(rigName))
-	paneDir, err := t.GetPaneWorkDir(sessionName)
-	if err == nil && paneDir != "" {
-		townRoot, _ = workspace.Find(paneDir)
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		paneDir, err := tmuxBackend.GetPaneWorkDir(sessionName)
+		if err == nil && paneDir != "" {
+			townRoot, _ = workspace.Find(paneDir)
+		}
 	}
 
 	// Get refinery manager using shared helper
@@ -614,9 +624,14 @@ func runRefineryStatusLine(t *tmux.Tmux, rigName string) error {
 // isSessionWorking detects if a Claude Code session is actively working.
 // Returns true if the ✻ symbol is visible in the pane (indicates Claude is processing).
 // Returns false for idle sessions (showing ❯ prompt) or if state cannot be determined.
-func isSessionWorking(t *tmux.Tmux, session string) bool {
+func isSessionWorking(backend session.SessionBackend, sess string) bool {
+	tmuxBackend, ok := backend.(*tmux.Tmux)
+	if !ok {
+		return false
+	}
+
 	// Capture last few lines of the pane
-	lines, err := t.CapturePaneLines(session, 5)
+	lines, err := tmuxBackend.CapturePaneLines(sess, 5)
 	if err != nil || len(lines) == 0 {
 		return false
 	}
@@ -690,9 +705,14 @@ func getHookedWork(identity string, maxLen int, beadsDir string) string {
 
 // getCurrentWork returns a truncated title of the first in_progress issue.
 // Uses the pane's working directory to find the beads.
-func getCurrentWork(t *tmux.Tmux, session string, maxLen int) string {
+func getCurrentWork(backend session.SessionBackend, sess string, maxLen int) string {
+	tmuxBackend, ok := backend.(*tmux.Tmux)
+	if !ok {
+		return ""
+	}
+
 	// Get the pane's working directory
-	workDir, err := t.GetPaneWorkDir(session)
+	workDir, err := tmuxBackend.GetPaneWorkDir(sess)
 	if err != nil || workDir == "" {
 		return ""
 	}

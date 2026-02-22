@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -259,13 +260,17 @@ func runSlingFormula(args []string) error {
 	} else {
 		prompt = fmt.Sprintf("Formula %s slung. Run `"+cli.Name()+" hook` to see your hook, then execute the steps.", formulaName)
 	}
-	t := tmux.NewTmux()
-	if err := t.NudgePane(targetPane, prompt); err != nil {
-		// Graceful fallback for no-tmux mode
-		fmt.Printf("%s Could not nudge (no tmux?): %v\n", style.Dim.Render("○"), err)
-		fmt.Printf("  Agent will discover work via gt prime / bd show\n")
+	backend := session.NewBackend()
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		if err := tmuxBackend.NudgePane(targetPane, prompt); err != nil {
+			// Graceful fallback for no-tmux mode
+			fmt.Printf("%s Could not nudge (no tmux?): %v\n", style.Dim.Render("○"), err)
+			fmt.Printf("  Agent will discover work via gt prime / bd show\n")
+		} else {
+			fmt.Printf("%s Nudged to start\n", style.Bold.Render("▶"))
+		}
 	} else {
-		fmt.Printf("%s Nudged to start\n", style.Bold.Render("▶"))
+		fmt.Printf("%s NudgePane not supported by %T backend, agent will discover work via gt prime\n", style.Dim.Render("○"), backend)
 	}
 
 	return nil

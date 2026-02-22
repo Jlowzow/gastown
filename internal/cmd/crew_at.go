@@ -133,12 +133,12 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if session exists
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 	sessionID := crewSessionName(r.Name, name)
 	if debug {
 		fmt.Printf("[DEBUG] sessionID=%q (r.Name=%q, name=%q)\n", sessionID, r.Name, name)
 	}
-	hasSession, err := t.HasSession(sessionID)
+	hasSession, err := backend.HasSession(sessionID)
 	if err != nil {
 		return fmt.Errorf("checking session: %w", err)
 	}
@@ -150,7 +150,12 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 	// running in this crew's directory (might have been started manually or via
 	// a different mechanism)
 	if !hasSession && runtimeConfig.Tmux != nil {
-		existingSessions, err := t.FindSessionByWorkDir(worker.ClonePath, runtimeConfig.Tmux.ProcessNames)
+		tmuxImpl, _ := backend.(*tmux.Tmux)
+		var existingSessions []string
+		var err error
+		if tmuxImpl != nil {
+			existingSessions, err = tmuxImpl.FindSessionByWorkDir(worker.ClonePath, runtimeConfig.Tmux.ProcessNames)
+		}
 		if err == nil && len(existingSessions) > 0 {
 			// Found an existing session with runtime running in this directory
 			existingSession := existingSessions[0]
@@ -179,7 +184,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 
 	if !hasSession {
 		// Create new session
-		if err := t.NewSession(sessionID, worker.ClonePath); err != nil {
+		if err := backend.NewSession(sessionID, worker.ClonePath); err != nil {
 			return fmt.Errorf("creating session: %w", err)
 		}
 
@@ -196,23 +201,30 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 			SessionName:      sessionID,
 		})
 		for k, v := range envVars {
-			_ = t.SetEnvironment(sessionID, k, v)
+			_ = backend.SetEnvironment(sessionID, k, v)
 		}
 
 		// Apply rig-based theming (non-fatal: theming failure doesn't affect operation)
 		// Note: ConfigureGasTownSession includes cycle bindings
 		theme := getThemeForRig(r.Name)
-		_ = t.ConfigureGasTownSession(sessionID, theme, r.Name, name, "crew")
+		if tmuxBackend, ok := backend.(session.TmuxExtras); ok {
+			_ = tmuxBackend.ConfigureGasTownSession(sessionID, theme, r.Name, name, "crew")
+		}
 
 		// Wait for shell to be ready after session creation
-		if err := t.WaitForShellReady(sessionID, constants.ShellReadyTimeout); err != nil {
-			return fmt.Errorf("waiting for shell: %w", err)
+		if tmuxImpl, ok := backend.(*tmux.Tmux); ok {
+			if err := tmuxImpl.WaitForShellReady(sessionID, constants.ShellReadyTimeout); err != nil {
+				return fmt.Errorf("waiting for shell: %w", err)
+			}
 		}
 
 		// Get pane ID for respawn
-		paneID, err := t.GetPaneID(sessionID)
-		if err != nil {
-			return fmt.Errorf("getting pane ID: %w", err)
+		var paneID string
+		if tmuxImpl, ok := backend.(*tmux.Tmux); ok {
+			paneID, err = tmuxImpl.GetPaneID(sessionID)
+			if err != nil {
+				return fmt.Errorf("getting pane ID: %w", err)
+			}
 		}
 
 		// Build startup beacon for predecessor discovery via /resume
@@ -248,8 +260,10 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 		// a fresh shell. Killing it would destroy the pane before we can respawn.
 		// KillPaneProcesses is only needed when restarting in an EXISTING session
 		// where Claude/Node processes might be running and ignoring SIGHUP.
-		if err := t.RespawnPane(paneID, startupCmd); err != nil {
-			return fmt.Errorf("starting runtime: %w", err)
+		if tmuxImpl, ok := backend.(*tmux.Tmux); ok {
+			if err := tmuxImpl.RespawnPane(paneID, startupCmd); err != nil {
+				return fmt.Errorf("starting runtime: %w", err)
+			}
 		}
 
 		fmt.Printf("%s Created session for %s/%s\n",
@@ -259,14 +273,17 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 		// Uses descendant process check instead of pane command check,
 		// since crew members launch via bash -c wrappers that cause
 		// false-negative detection with IsAgentRunning (see #1315, #1330).
-		if !t.IsAgentAlive(sessionID) {
+		if !backend.IsAgentAlive(sessionID) {
 			// Runtime has exited, restart it using respawn-pane
 			fmt.Printf("Runtime exited, restarting...\n")
 
 			// Get pane ID for respawn
-			paneID, err := t.GetPaneID(sessionID)
-			if err != nil {
-				return fmt.Errorf("getting pane ID: %w", err)
+			var paneID string
+			if tmuxImpl, ok := backend.(*tmux.Tmux); ok {
+				paneID, err = tmuxImpl.GetPaneID(sessionID)
+				if err != nil {
+					return fmt.Errorf("getting pane ID: %w", err)
+				}
 			}
 
 			// Build startup beacon for predecessor discovery via /resume
@@ -298,25 +315,29 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 			}
 			// Kill all processes in the pane before respawning to prevent orphan leaks
 			// RespawnPane's -k flag only sends SIGHUP which Claude/Node may ignore
-			if err := t.KillPaneProcesses(paneID); err != nil {
-				// Non-fatal but log the warning
-				style.PrintWarning("could not kill pane processes: %v", err)
-			}
-			if err := t.RespawnPane(paneID, startupCmd); err != nil {
-				// If pane is stale (session exists but pane doesn't), recreate the session
-				if strings.Contains(err.Error(), "can't find pane") {
-					if crewAtRetried {
-						return fmt.Errorf("stale session persists after cleanup: %w", err)
-					}
-					fmt.Printf("Stale session detected, recreating...\n")
-					if killErr := t.KillSession(sessionID); killErr != nil && killErr != tmux.ErrSessionNotFound {
-						return fmt.Errorf("failed to kill stale session: %w", killErr)
-					}
-					crewAtRetried = true
-					defer func() { crewAtRetried = false }()
-					return runCrewAt(cmd, args) // Retry with fresh session
+			if tmuxImpl, ok := backend.(*tmux.Tmux); ok {
+				if err := tmuxImpl.KillPaneProcesses(paneID); err != nil {
+					// Non-fatal but log the warning
+					style.PrintWarning("could not kill pane processes: %v", err)
 				}
-				return fmt.Errorf("restarting runtime: %w", err)
+			}
+			if tmuxImpl, ok := backend.(*tmux.Tmux); ok {
+				if err := tmuxImpl.RespawnPane(paneID, startupCmd); err != nil {
+					// If pane is stale (session exists but pane doesn't), recreate the session
+					if strings.Contains(err.Error(), "can't find pane") {
+						if crewAtRetried {
+							return fmt.Errorf("stale session persists after cleanup: %w", err)
+						}
+						fmt.Printf("Stale session detected, recreating...\n")
+						if killErr := backend.KillSession(sessionID); killErr != nil && killErr != tmux.ErrSessionNotFound {
+							return fmt.Errorf("failed to kill stale session: %w", killErr)
+						}
+						crewAtRetried = true
+						defer func() { crewAtRetried = false }()
+						return runCrewAt(cmd, args) // Retry with fresh session
+					}
+					return fmt.Errorf("restarting runtime: %w", err)
+				}
 			}
 		}
 	}
@@ -325,7 +346,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 	if isInTmuxSession(sessionID) {
 		// Check if agent is already alive - don't restart if so
 		// Uses descendant process check (see #1315, #1330).
-		if t.IsAgentAlive(sessionID) {
+		if backend.IsAgentAlive(sessionID) {
 			// Agent is already running, nothing to do
 			fmt.Printf("Already in %s session with agent running.\n", name)
 			return nil

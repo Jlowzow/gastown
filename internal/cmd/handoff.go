@@ -163,7 +163,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 
 	// Verify we're in tmux
 	if !tmux.IsInsideTmux() {
@@ -223,8 +223,8 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	// If handing off a different session, we need to find its pane and respawn there
 	if targetSession != currentSession {
 		// Update tmux session env before respawn (not during dry-run — see below)
-		updateSessionEnvForHandoff(t, targetSession, "")
-		return handoffRemoteSession(t, targetSession, restartCmd)
+		updateSessionEnvForHandoff(backend, targetSession, "")
+		return handoffRemoteSession(backend, targetSession, restartCmd)
 	}
 
 	// Handing off ourselves - print feedback then respawn
@@ -256,7 +256,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	// not from shell exports. The restart command sets shell exports for the child
 	// process, but we must also update the session env so liveness checks work.
 	// Placed after the dry-run guard to avoid mutating session state during dry-run.
-	updateSessionEnvForHandoff(t, currentSession, "")
+	updateSessionEnvForHandoff(backend, currentSession, "")
 
 	// Send handoff mail to self (defaults applied inside sendHandoffMail).
 	// The mail is auto-hooked so the next session picks it up.
@@ -273,9 +273,11 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	// "Discover, don't track" principle: reality is truth, state is derived.
 
 	// Clear scrollback history before respawn (resets copy-mode from [0/N] to [0/0])
-	if err := t.ClearHistory(pane); err != nil {
-		// Non-fatal - continue with respawn even if clear fails
-		style.PrintWarning("could not clear history: %v", err)
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		if err := tmuxBackend.ClearHistory(pane); err != nil {
+			// Non-fatal - continue with respawn even if clear fails
+			style.PrintWarning("could not clear history: %v", err)
+		}
 	}
 
 	// Write handoff marker for successor detection (prevents handoff loop bug).
@@ -291,8 +293,10 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	// Set remain-on-exit so the pane survives process death during handoff.
 	// Without this, killing processes causes tmux to destroy the pane before
 	// we can respawn it. This is essential for tmux session reuse.
-	if err := t.SetRemainOnExit(pane, true); err != nil {
-		style.PrintWarning("could not set remain-on-exit: %v", err)
+	if tmuxBackend, ok := backend.(session.TmuxExtras); ok {
+		if err := tmuxBackend.SetRemainOnExit(pane, true); err != nil {
+			style.PrintWarning("could not set remain-on-exit: %v", err)
+		}
 	}
 
 	// NOTE: For self-handoff, we do NOT call KillPaneProcesses here.
@@ -306,19 +310,23 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	// kill orphans at startup, not to kill ourselves before respawning.
 
 	// Check if pane's working directory exists (may have been deleted)
-	paneWorkDir, _ := t.GetPaneWorkDir(currentSession)
-	if paneWorkDir != "" {
-		if _, err := os.Stat(paneWorkDir); err != nil {
-			if townRoot := detectTownRootFromCwd(); townRoot != "" {
-				style.PrintWarning("pane working directory deleted, using town root")
-				return t.RespawnPaneWithWorkDir(pane, townRoot, restartCmd)
+	tmuxBackend, isTmux := backend.(*tmux.Tmux)
+	if isTmux {
+		paneWorkDir, _ := tmuxBackend.GetPaneWorkDir(currentSession)
+		if paneWorkDir != "" {
+			if _, err := os.Stat(paneWorkDir); err != nil {
+				if townRoot := detectTownRootFromCwd(); townRoot != "" {
+					style.PrintWarning("pane working directory deleted, using town root")
+					return tmuxBackend.RespawnPaneWithWorkDir(pane, townRoot, restartCmd)
+				}
 			}
 		}
-	}
 
-	// Use respawn-pane -k to atomically kill current process and start new one
-	// Note: respawn-pane automatically resets remain-on-exit to off
-	return t.RespawnPane(pane, restartCmd)
+		// Use respawn-pane -k to atomically kill current process and start new one
+		// Note: respawn-pane automatically resets remain-on-exit to off
+		return tmuxBackend.RespawnPane(pane, restartCmd)
+	}
+	return fmt.Errorf("backend does not support RespawnPane (not tmux)")
 }
 
 // runHandoffAuto saves state without cycling the session.
@@ -440,7 +448,7 @@ func runHandoffCycle() error {
 		return runHandoffAuto()
 	}
 
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 
 	if handoffDryRun {
 		fmt.Printf("[cycle] Would send handoff mail: subject=%q\n", subject)
@@ -487,27 +495,34 @@ func runHandoffCycle() error {
 	fmt.Fprintf(os.Stderr, "handoff --cycle: cycling session %s\n", currentSession)
 
 	// Set remain-on-exit so the pane survives process death during handoff
-	if err := t.SetRemainOnExit(pane, true); err != nil {
-		style.PrintWarning("could not set remain-on-exit: %v", err)
-	}
-
-	// Clear scrollback history before respawn
-	if err := t.ClearHistory(pane); err != nil {
-		style.PrintWarning("could not clear history: %v", err)
-	}
-
-	// Check if pane's working directory exists (may have been deleted)
-	paneWorkDir, _ := t.GetPaneWorkDir(currentSession)
-	if paneWorkDir != "" {
-		if _, err := os.Stat(paneWorkDir); err != nil {
-			if townRoot := detectTownRootFromCwd(); townRoot != "" {
-				return t.RespawnPaneWithWorkDir(pane, townRoot, restartCmd)
-			}
+	if tmuxBackend, ok := backend.(session.TmuxExtras); ok {
+		if err := tmuxBackend.SetRemainOnExit(pane, true); err != nil {
+			style.PrintWarning("could not set remain-on-exit: %v", err)
 		}
 	}
 
-	// Respawn pane — this atomically kills current process and starts fresh
-	return t.RespawnPane(pane, restartCmd)
+	// Clear scrollback history before respawn
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		if err := tmuxBackend.ClearHistory(pane); err != nil {
+			style.PrintWarning("could not clear history: %v", err)
+		}
+	}
+
+	// Check if pane's working directory exists (may have been deleted)
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		paneWorkDir, _ := tmuxBackend.GetPaneWorkDir(currentSession)
+		if paneWorkDir != "" {
+			if _, err := os.Stat(paneWorkDir); err != nil {
+				if townRoot := detectTownRootFromCwd(); townRoot != "" {
+					return tmuxBackend.RespawnPaneWithWorkDir(pane, townRoot, restartCmd)
+				}
+			}
+		}
+
+		// Respawn pane — this atomically kills current process and starts fresh
+		return tmuxBackend.RespawnPane(pane, restartCmd)
+	}
+	return fmt.Errorf("backend does not support RespawnPane (not tmux)")
 }
 
 // getCurrentTmuxSession returns the current tmux session name.
@@ -719,8 +734,8 @@ func buildRestartCommand(sessionName string) (string, error) {
 	// since exec env vars may not propagate through all agent runtimes.
 	currentAgent := os.Getenv("GT_AGENT")
 	if currentAgent == "" {
-		t := tmux.NewTmux()
-		if val, err := t.GetEnvironment(sessionName, "GT_AGENT"); err == nil && val != "" {
+		backend := session.NewBackend()
+		if val, err := backend.GetEnvironment(sessionName, "GT_AGENT"); err == nil && val != "" {
 			currentAgent = val
 		}
 	}
@@ -817,7 +832,7 @@ func buildRestartCommand(sessionName string) (string, error) {
 // GT_PROCESS_NAMES from the tmux session env (via tmux show-environment), not
 // from shell exports in the pane. Without this, post-handoff liveness checks
 // would use stale values from the previous agent.
-func updateSessionEnvForHandoff(t *tmux.Tmux, sessionName, agentOverride string) {
+func updateSessionEnvForHandoff(backend session.SessionBackend, sessionName, agentOverride string) {
 	// Resolve current agent using the same priority as buildRestartCommandWithAgent
 	var currentAgent string
 	if agentOverride != "" {
@@ -825,7 +840,7 @@ func updateSessionEnvForHandoff(t *tmux.Tmux, sessionName, agentOverride string)
 	} else {
 		currentAgent = os.Getenv("GT_AGENT")
 		if currentAgent == "" {
-			if val, err := t.GetEnvironment(sessionName, "GT_AGENT"); err == nil && val != "" {
+			if val, err := backend.GetEnvironment(sessionName, "GT_AGENT"); err == nil && val != "" {
 				currentAgent = val
 			}
 		}
@@ -836,7 +851,7 @@ func updateSessionEnvForHandoff(t *tmux.Tmux, sessionName, agentOverride string)
 	}
 
 	// Update GT_AGENT in session env
-	_ = t.SetEnvironment(sessionName, "GT_AGENT", currentAgent)
+	_ = backend.SetEnvironment(sessionName, "GT_AGENT", currentAgent)
 
 	// Resolve and update GT_PROCESS_NAMES in session env
 	// When switching agents, recompute from config. When preserving, use env value.
@@ -867,7 +882,7 @@ func updateSessionEnvForHandoff(t *tmux.Tmux, sessionName, agentOverride string)
 		}
 	}
 
-	_ = t.SetEnvironment(sessionName, "GT_PROCESS_NAMES", processNames)
+	_ = backend.SetEnvironment(sessionName, "GT_PROCESS_NAMES", processNames)
 }
 
 // sessionWorkDir returns the correct working directory for a session.
@@ -954,9 +969,9 @@ func detectTownRootFromCwd() string {
 }
 
 // handoffRemoteSession respawns a different session and optionally switches to it.
-func handoffRemoteSession(t *tmux.Tmux, targetSession, restartCmd string) error {
+func handoffRemoteSession(backend session.SessionBackend, targetSession, restartCmd string) error {
 	// Check if target session exists
-	exists, err := t.HasSession(targetSession)
+	exists, err := backend.HasSession(targetSession)
 	if err != nil {
 		return fmt.Errorf("checking session: %w", err)
 	}
@@ -985,35 +1000,45 @@ func handoffRemoteSession(t *tmux.Tmux, targetSession, restartCmd string) error 
 	// Set remain-on-exit so the pane survives process death during handoff.
 	// Without this, killing processes causes tmux to destroy the pane before
 	// we can respawn it. This is essential for tmux session reuse.
-	if err := t.SetRemainOnExit(targetPane, true); err != nil {
-		style.PrintWarning("could not set remain-on-exit: %v", err)
+	if tmuxBackend, ok := backend.(session.TmuxExtras); ok {
+		if err := tmuxBackend.SetRemainOnExit(targetPane, true); err != nil {
+			style.PrintWarning("could not set remain-on-exit: %v", err)
+		}
 	}
 
 	// Kill all processes in the pane before respawning to prevent orphan leaks
 	// RespawnPane's -k flag only sends SIGHUP which Claude/Node may ignore
-	if err := t.KillPaneProcesses(targetPane); err != nil {
-		// Non-fatal but log the warning
-		style.PrintWarning("could not kill pane processes: %v", err)
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		if err := tmuxBackend.KillPaneProcesses(targetPane); err != nil {
+			// Non-fatal but log the warning
+			style.PrintWarning("could not kill pane processes: %v", err)
+		}
 	}
 
 	// Clear scrollback history before respawn (resets copy-mode from [0/N] to [0/0])
-	if err := t.ClearHistory(targetPane); err != nil {
-		// Non-fatal - continue with respawn even if clear fails
-		style.PrintWarning("could not clear history: %v", err)
+	if tmuxBackend, ok := backend.(*tmux.Tmux); ok {
+		if err := tmuxBackend.ClearHistory(targetPane); err != nil {
+			// Non-fatal - continue with respawn even if clear fails
+			style.PrintWarning("could not clear history: %v", err)
+		}
 	}
 
 	// Respawn the remote session's pane, handling deleted working directories
 	respawnErr := func() error {
-		paneWorkDir, _ := t.GetPaneWorkDir(targetSession)
+		tmuxBackend, ok := backend.(*tmux.Tmux)
+		if !ok {
+			return fmt.Errorf("backend does not support RespawnPane (not tmux)")
+		}
+		paneWorkDir, _ := tmuxBackend.GetPaneWorkDir(targetSession)
 		if paneWorkDir != "" {
 			if _, statErr := os.Stat(paneWorkDir); statErr != nil {
 				if townRoot := detectTownRootFromCwd(); townRoot != "" {
 					style.PrintWarning("pane working directory deleted, using town root")
-					return t.RespawnPaneWithWorkDir(targetPane, townRoot, restartCmd)
+					return tmuxBackend.RespawnPaneWithWorkDir(targetPane, townRoot, restartCmd)
 				}
 			}
 		}
-		return t.RespawnPane(targetPane, restartCmd)
+		return tmuxBackend.RespawnPane(targetPane, restartCmd)
 	}()
 	if respawnErr != nil {
 		return fmt.Errorf("respawning pane: %w", respawnErr)

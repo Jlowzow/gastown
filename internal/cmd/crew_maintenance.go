@@ -8,8 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/crew"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 func runCrewRename(cmd *cobra.Command, args []string) error {
@@ -31,10 +31,10 @@ func runCrewRename(cmd *cobra.Command, args []string) error {
 
 	// Kill any running session for the old name.
 	// Use KillSessionWithProcesses to ensure all descendant processes are killed.
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 	oldSessionID := crewSessionName(r.Name, oldName)
-	if hasSession, _ := t.HasSession(oldSessionID); hasSession {
-		if err := t.KillSessionWithProcesses(oldSessionID); err != nil {
+	if hasSession, _ := backend.HasSession(oldSessionID); hasSession {
+		if err := backend.KillSessionWithProcesses(oldSessionID); err != nil {
 			return fmt.Errorf("killing old session: %w", err)
 		}
 		fmt.Printf("Killed session %s\n", oldSessionID)

@@ -6,7 +6,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/session"
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 var issueCmd = &cobra.Command{
@@ -60,17 +59,17 @@ func runIssueSet(cmd *cobra.Command, args []string) error {
 	issueID := args[0]
 
 	// Get current tmux session
-	session := os.Getenv("TMUX_PANE")
-	if session == "" {
+	sess := os.Getenv("TMUX_PANE")
+	if sess == "" {
 		// Try to detect from GT env vars
-		session = detectCurrentSession()
-		if session == "" {
+		sess = detectCurrentSession()
+		if sess == "" {
 			return fmt.Errorf("not in a tmux session")
 		}
 	}
 
-	t := tmux.NewTmux()
-	if err := t.SetEnvironment(session, "GT_ISSUE", issueID); err != nil {
+	backend := session.NewBackend()
+	if err := backend.SetEnvironment(sess, "GT_ISSUE", issueID); err != nil {
 		return fmt.Errorf("setting issue: %w", err)
 	}
 
@@ -79,17 +78,17 @@ func runIssueSet(cmd *cobra.Command, args []string) error {
 }
 
 func runIssueClear(cmd *cobra.Command, args []string) error {
-	session := os.Getenv("TMUX_PANE")
-	if session == "" {
-		session = detectCurrentSession()
-		if session == "" {
+	sess := os.Getenv("TMUX_PANE")
+	if sess == "" {
+		sess = detectCurrentSession()
+		if sess == "" {
 			return fmt.Errorf("not in a tmux session")
 		}
 	}
 
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 	// Set to empty string to clear
-	if err := t.SetEnvironment(session, "GT_ISSUE", ""); err != nil {
+	if err := backend.SetEnvironment(sess, "GT_ISSUE", ""); err != nil {
 		return fmt.Errorf("clearing issue: %w", err)
 	}
 
@@ -98,16 +97,16 @@ func runIssueClear(cmd *cobra.Command, args []string) error {
 }
 
 func runIssueShow(cmd *cobra.Command, args []string) error {
-	session := os.Getenv("TMUX_PANE")
-	if session == "" {
-		session = detectCurrentSession()
-		if session == "" {
+	sess := os.Getenv("TMUX_PANE")
+	if sess == "" {
+		sess = detectCurrentSession()
+		if sess == "" {
 			return fmt.Errorf("not in a tmux session")
 		}
 	}
 
-	t := tmux.NewTmux()
-	issue, err := t.GetEnvironment(session, "GT_ISSUE")
+	backend := session.NewBackend()
+	issue, err := backend.GetEnvironment(sess, "GT_ISSUE")
 	if err != nil {
 		return fmt.Errorf("getting issue: %w", err)
 	}

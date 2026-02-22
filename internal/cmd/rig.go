@@ -24,7 +24,6 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/wisp"
 	"github.com/steveyegge/gastown/internal/witness"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -320,7 +319,7 @@ var (
 	// Test seams for checkUncommittedWork.
 	listPolecatsForWorkCheck = func(r *rig.Rig) ([]*polecat.Polecat, error) {
 		polecatGit := git.NewGit(r.Path)
-		polecatMgr := polecat.NewManager(r, polecatGit, nil) // nil tmux: just listing
+		polecatMgr := polecat.NewManagerWithBackend(r, polecatGit, nil) // nil backend: just listing
 		return polecatMgr.List()
 	}
 	checkPolecatWorkStatus = func(clonePath string) (*git.UncommittedWorkStatus, error) {
@@ -676,7 +675,7 @@ func runRigList(cmd *cobra.Command, args []string) error {
 	// Create rig manager to get details
 	g := git.NewGit(townRoot)
 	mgr := rig.NewManager(townRoot, rigsConfig, g)
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 
 	type rigInfo struct {
 		Name     string `json:"name"`
@@ -702,8 +701,8 @@ func runRigList(cmd *cobra.Command, args []string) error {
 
 		witnessSession := session.WitnessSessionName(session.PrefixFor(name))
 		refinerySession := session.RefinerySessionName(session.PrefixFor(name))
-		witnessRunning, _ := t.HasSession(witnessSession)
-		refineryRunning, _ := t.HasSession(refinerySession)
+		witnessRunning, _ := backend.HasSession(witnessSession)
+		refineryRunning, _ := backend.HasSession(refinerySession)
 
 		witnessStatus := "stopped"
 		if witnessRunning {
@@ -800,18 +799,18 @@ func runRigRemove(cmd *cobra.Command, args []string) error {
 	g := git.NewGit(townRoot)
 	mgr := rig.NewManager(townRoot, rigsConfig, g)
 
-	// Check for running tmux sessions before removing
-	t := tmux.NewTmux()
-	sessions, sessErr := findRigSessions(t, name)
+	// Check for running sessions before removing
+	backend := session.NewBackend()
+	sessions, sessErr := findRigSessions(backend, name)
 	if sessErr != nil {
 		if !rigRemoveForce {
 			return fmt.Errorf("could not verify session state for rig %s: %w (use --force to skip check)", name, sessErr)
 		}
-		fmt.Printf("  %s Could not check tmux sessions: %v (proceeding due to --force)\n", style.Warning.Render("!"), sessErr)
+		fmt.Printf("  %s Could not check sessions: %v (proceeding due to --force)\n", style.Warning.Render("!"), sessErr)
 	}
 	if len(sessions) > 0 {
 		if !rigRemoveForce {
-			fmt.Printf("%s Rig %s has %d running tmux session(s):\n",
+			fmt.Printf("%s Rig %s has %d running session(s):\n",
 				style.Warning.Render("⚠"), name, len(sessions))
 			for _, s := range sessions {
 				fmt.Printf("  - %s\n", s)
@@ -824,10 +823,10 @@ func runRigRemove(cmd *cobra.Command, args []string) error {
 		}
 
 		// --force: kill all rig sessions (WARNING: may lose uncommitted work)
-		fmt.Printf("Killing %d tmux session(s) for rig %s...\n", len(sessions), name)
+		fmt.Printf("Killing %d session(s) for rig %s...\n", len(sessions), name)
 		var killErrors []string
 		for _, s := range sessions {
-			if err := t.KillSessionWithProcesses(s); err != nil {
+			if err := backend.KillSessionWithProcesses(s); err != nil {
 				fmt.Printf("  %s Failed to kill session %s: %v\n", style.Warning.Render("!"), s, err)
 				killErrors = append(killErrors, s)
 			} else {
@@ -1160,7 +1159,7 @@ func runRigReset(cmd *cobra.Command, args []string) error {
 
 // runResetStale resets in_progress issues whose assigned agent no longer has a session.
 func runResetStale(bd *beads.Beads, dryRun bool) error {
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 
 	// Get all in_progress issues
 	issues, err := bd.List(beads.ListOptions{
@@ -1191,9 +1190,9 @@ func runResetStale(bd *beads.Beads, dryRun bool) error {
 		}
 
 		// Check if session exists
-		hasSession, err := t.HasSession(sessionName)
+		hasSession, err := backend.HasSession(sessionName)
 		if err != nil {
-			// tmux error, skip this one
+			// backend error, skip this one
 			continue
 		}
 
@@ -1320,12 +1319,12 @@ func runRigBoot(cmd *cobra.Command, args []string) error {
 	var started []string
 	var skipped []string
 
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 
 	// 1. Start the witness
-	// Check actual tmux session, not state file (may be stale)
+	// Check actual session, not state file (may be stale)
 	witnessSession := session.WitnessSessionName(session.PrefixFor(rigName))
-	witnessRunning, _ := t.HasSession(witnessSession)
+	witnessRunning, _ := backend.HasSession(witnessSession)
 	if witnessRunning {
 		skipped = append(skipped, "witness (already running)")
 	} else {
@@ -1343,9 +1342,9 @@ func runRigBoot(cmd *cobra.Command, args []string) error {
 	}
 
 	// 2. Start the refinery
-	// Check actual tmux session, not state file (may be stale)
+	// Check actual session, not state file (may be stale)
 	refinerySession := session.RefinerySessionName(session.PrefixFor(rigName))
-	refineryRunning, _ := t.HasSession(refinerySession)
+	refineryRunning, _ := backend.HasSession(refinerySession)
 	if refineryRunning {
 		skipped = append(skipped, "refinery (already running)")
 	} else {
@@ -1384,7 +1383,7 @@ func runRigStart(cmd *cobra.Command, args []string) error {
 
 	g := git.NewGit(townRoot)
 	rigMgr := rig.NewManager(townRoot, rigsConfig, g)
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 
 	var successRigs []string
 	var failedRigs []string
@@ -1414,7 +1413,7 @@ func runRigStart(cmd *cobra.Command, args []string) error {
 
 		// 1. Start the witness
 		witnessSession := session.WitnessSessionName(session.PrefixFor(rigName))
-		witnessRunning, _ := t.HasSession(witnessSession)
+		witnessRunning, _ := backend.HasSession(witnessSession)
 		if witnessRunning {
 			skipped = append(skipped, "witness")
 		} else {
@@ -1434,7 +1433,7 @@ func runRigStart(cmd *cobra.Command, args []string) error {
 
 		// 2. Start the refinery
 		refinerySession := session.RefinerySessionName(session.PrefixFor(rigName))
-		refineryRunning, _ := t.HasSession(refinerySession)
+		refineryRunning, _ := backend.HasSession(refinerySession)
 		if refineryRunning {
 			skipped = append(skipped, "refinery")
 		} else {
@@ -1509,8 +1508,8 @@ func runRigShutdown(cmd *cobra.Command, args []string) error {
 	var errors []string
 
 	// 1. Stop all polecat sessions
-	t := tmux.NewTmux()
-	polecatMgr := polecat.NewSessionManager(t, r)
+	backend := session.NewBackend()
+	polecatMgr := polecat.NewSessionManagerWithBackend(backend, r)
 	infos, err := polecatMgr.ListPolecats()
 	if err == nil && len(infos) > 0 {
 		fmt.Printf("  Stopping %d polecat session(s)...\n", len(infos))
@@ -1598,7 +1597,7 @@ func runRigStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 
 	// Header
 	fmt.Printf("%s\n", style.Bold.Render(rigName))
@@ -1648,7 +1647,7 @@ func runRigStatus(cmd *cobra.Command, args []string) error {
 
 	// Polecats
 	polecatGit := git.NewGit(r.Path)
-	polecatMgr := polecat.NewManager(r, polecatGit, t)
+	polecatMgr := polecat.NewManagerWithBackend(r, polecatGit, backend)
 	polecats, err := polecatMgr.List()
 	fmt.Printf("%s", style.Bold.Render("Polecats"))
 	if err != nil || len(polecats) == 0 {
@@ -1657,7 +1656,7 @@ func runRigStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf(" (%d)\n", len(polecats))
 		for _, p := range polecats {
 			sessionName := session.PolecatSessionName(session.PrefixFor(rigName), p.Name)
-			hasSession, _ := t.HasSession(sessionName)
+			hasSession, _ := backend.HasSession(sessionName)
 
 			sessionIcon := style.Dim.Render("○")
 			if hasSession {
@@ -1695,7 +1694,7 @@ func runRigStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf(" (%d)\n", len(crewWorkers))
 		for _, w := range crewWorkers {
 			sessionName := crewSessionName(rigName, w.Name)
-			hasSession, _ := t.HasSession(sessionName)
+			hasSession, _ := backend.HasSession(sessionName)
 
 			sessionIcon := style.Dim.Render("○")
 			if hasSession {
@@ -1760,8 +1759,8 @@ func runRigStop(cmd *cobra.Command, args []string) error {
 		var errors []string
 
 		// 1. Stop all polecat sessions
-		t := tmux.NewTmux()
-		polecatMgr := polecat.NewSessionManager(t, r)
+		backend := session.NewBackend()
+		polecatMgr := polecat.NewSessionManagerWithBackend(backend, r)
 		infos, err := polecatMgr.ListPolecats()
 		if err == nil && len(infos) > 0 {
 			fmt.Printf("  Stopping %d polecat session(s)...\n", len(infos))
@@ -1833,7 +1832,7 @@ func runRigRestart(cmd *cobra.Command, args []string) error {
 
 	g := git.NewGit(townRoot)
 	rigMgr := rig.NewManager(townRoot, rigsConfig, g)
-	t := tmux.NewTmux()
+	backend := session.NewBackend()
 
 	// Track results
 	var succeeded []string
@@ -1863,7 +1862,7 @@ func runRigRestart(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Stopping...\n")
 
 		// 1. Stop all polecat sessions
-		polecatMgr := polecat.NewSessionManager(t, r)
+		polecatMgr := polecat.NewSessionManagerWithBackend(backend, r)
 		infos, err := polecatMgr.ListPolecats()
 		if err == nil && len(infos) > 0 {
 			fmt.Printf("    Stopping %d polecat session(s)...\n", len(infos))
@@ -1907,7 +1906,7 @@ func runRigRestart(cmd *cobra.Command, args []string) error {
 
 		// 1. Start the witness
 		witnessSession := session.WitnessSessionName(session.PrefixFor(rigName))
-		witnessRunning, _ := t.HasSession(witnessSession)
+		witnessRunning, _ := backend.HasSession(witnessSession)
 		if witnessRunning {
 			skipped = append(skipped, "witness")
 		} else {
@@ -1926,7 +1925,7 @@ func runRigRestart(cmd *cobra.Command, args []string) error {
 
 		// 2. Start the refinery
 		refinerySession := session.RefinerySessionName(session.PrefixFor(rigName))
-		refineryRunning, _ := t.HasSession(refinerySession)
+		refineryRunning, _ := backend.HasSession(refinerySession)
 		if refineryRunning {
 			skipped = append(skipped, "refinery")
 		} else {
@@ -2046,14 +2045,14 @@ func syncRigHooks(townRoot, rigName string) error {
 	return nil
 }
 
-// findRigSessions returns all tmux sessions belonging to the given rig.
+// findRigSessions returns all sessions belonging to the given rig.
 // All rig sessions share the "<rigPrefix>-" prefix, so this catches witness,
 // refinery, polecat, and crew sessions in one pass.
-func findRigSessions(t *tmux.Tmux, rigName string) ([]string, error) {
+func findRigSessions(backend session.SessionBackend, rigName string) ([]string, error) {
 	prefix := session.PrefixFor(rigName) + "-"
-	all, err := t.ListSessions()
+	all, err := backend.ListSessions()
 	if err != nil {
-		return nil, fmt.Errorf("listing tmux sessions: %w", err)
+		return nil, fmt.Errorf("listing sessions: %w", err)
 	}
 	var matches []string
 	for _, name := range all {
